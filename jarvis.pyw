@@ -1,10 +1,11 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║       J.A.R.V.I.S  v6.0  –  Deep Memory Agent Edition            ║
-║  Powered by Ollama · Llama 3.1 (chat) · LLaVA (vision)          ║
+║       J.A.R.V.I.S  v7.0  –  Living Profile & Automation         ║
+║  Powered by Ollama · Mistral-Nemo · Qwen2.5-Coder · LLaVA      ║
 ║  Acciones: conversar · crear_archivo · borrar_archivo            ║
 ║            · ver_pantalla · presionar_tecla · abrir_web          ║
 ║            · abrir_programa · escribir_texto · cerrar_programa   ║
+║            · controlar_multimedia · abrir_juego · mensaje_discord║
 ║  Tools:    obtener_clima · obtener_noticias · buscar_info        ║
 ╚══════════════════════════════════════════════════════════════════╝
 
@@ -130,6 +131,17 @@ except ImportError:
     )
 
 
+# Módulo de automatización de apps de terceros
+try:
+    import automations
+    AUTOMATIONS_OK = True
+except ImportError:
+    AUTOMATIONS_OK = False
+    _avisos_inicio.append(
+        "[SIN AUTO] automations.py no encontrado -> control de apps deshabilitado."
+    )
+
+
 # ══════════════════════════════════════════════════════════════════
 #  CONFIGURACION
 # ══════════════════════════════════════════════════════════════════
@@ -154,8 +166,10 @@ def elegir_modelo(orden: str) -> str:
         return MODELO_CODER
     return MODELO_GENERAL
 
-# Idioma para el reconocimiento de voz (Google Speech API)
-IDIOMA_VOZ = "es-ES"
+# Idiomas para el reconocimiento de voz (Google Speech API)
+# Intento dual: primero español, fallback a inglés sobre el mismo audio
+IDIOMA_VOZ     = "es-ES"
+IDIOMA_VOZ_ALT = "en-US"
 
 # Palabra clave que activa JARVIS
 WAKE_WORD = "jarvis"
@@ -173,35 +187,47 @@ SAMPLE_RATE      = 44100
 BLOCK_SIZE       = 512    # Bloques pequenos = reaccion mas rapida a transitorios
 CLAP_DEBUG       = True   # Mostrar metricas de audio en consola para depurar
 
-# --- Mapeo de palabras -> tecla pyautogui ---
+# --- Mapeo de palabras -> tecla pyautogui (ES + EN) ---
 MAPA_TECLAS: dict[str, str] = {
-    # Reproduccion
+    # Reproduccion (ES)
     "pausa"       : "space",
     "parar"       : "space",
     "play"        : "space",
     "siguiente"   : "right",
     "anterior"    : "left",
-    # Volumen
+    # Reproduccion (EN)
+    "pause"       : "space",
+    "stop"        : "space",
+    "next"        : "right",
+    "previous"    : "left",
+    # Volumen (ES)
     "sube el volumen" : "volumeup",
     "subir volumen"   : "volumeup",
     "baja el volumen" : "volumedown",
     "bajar volumen"   : "volumedown",
     "silenciar"       : "volumemute",
     "silencio"        : "volumemute",
+    # Volumen (EN)
+    "volume up"       : "volumeup",
+    "volume down"     : "volumedown",
     "mute"            : "volumemute",
     # Pantalla
     "pantalla completa" : "f",
     "fullscreen"        : "f",
+    "full screen"       : "f",
     # Navegador / general
     "recarga"     : "f5",
     "recargar"    : "f5",
+    "reload"      : "f5",
     "escape"      : "escape",
     "cerrar pestaña" : "ctrl+w",
+    "close tab"      : "ctrl+w",
 }
 
 # Frases de cierre por voz
 FRASES_CIERRE = {"apagate", "apágate", "cerrar sistema", "cierra el sistema",
-                 "apagarse", "shutdown", "termina", "terminar sistema"}
+                 "apagarse", "shutdown", "termina", "terminar sistema",
+                 "shut down", "turn off", "power off", "good bye", "goodbye"}
 
 # Frases de despedida aleatorias
 DESPEDIDAS = [
@@ -224,6 +250,7 @@ DIR_FILES       = DIR_BASE / "archivos_jarvis"
 DIR_FILES.mkdir(exist_ok=True)
 ARCHIVO_MEMORIA = DIR_FILES / "memoria.json"
 ARCHIVO_MEMORIA_PROFUNDA = DIR_FILES / "memoria_profunda.json"
+ARCHIVO_PROFILE  = DIR_BASE / "system_profile.txt"
 TEMP_SCREENSHOT = DIR_BASE / "temp_vision.png"
 PIPER_DIR       = DIR_BASE / "piper"
 PIPER_BIN       = PIPER_DIR / ("piper.exe" if sys.platform.startswith("win") else "piper")
@@ -265,11 +292,36 @@ def emitir_ui(tipo: str, datos: str = ""):
 
 
 # ══════════════════════════════════════════════════════════════════
-#  PROMPT DE SISTEMA (DINÁMICO — inyecta fecha/hora actual)
+#  SYSTEM PROFILE — Personalidad cargada desde archivo externo
+# ══════════════════════════════════════════════════════════════════
+
+_PROFILE_DEFAULT = (
+    "Eres JARVIS, una IA avanzada y conversacional que asiste al usuario en su PC.\n"
+    "Eres brillante, ingenioso y siempre util. Responde de forma concisa y natural.\n"
+)
+
+def cargar_system_profile() -> str:
+    """Lee el archivo system_profile.txt. Devuelve perfil por defecto si no existe."""
+    if not ARCHIVO_PROFILE.exists():
+        log(f"system_profile.txt no encontrado en {ARCHIVO_PROFILE}. Usando perfil por defecto.", "PROFILE")
+        return _PROFILE_DEFAULT
+    try:
+        contenido = ARCHIVO_PROFILE.read_text(encoding="utf-8").strip()
+        if not contenido:
+            return _PROFILE_DEFAULT
+        log(f"Perfil cargado desde {ARCHIVO_PROFILE.name} ({len(contenido)} chars).", "PROFILE")
+        return contenido
+    except Exception as e:
+        log(f"Error al leer system_profile.txt: {e}", "PROFILE")
+        return _PROFILE_DEFAULT
+
+
+# ══════════════════════════════════════════════════════════════════
+#  PROMPT DE SISTEMA (DINÁMICO — profile + fecha/hora + memoria)
 # ══════════════════════════════════════════════════════════════════
 
 def obtener_system_prompt() -> str:
-    """Genera el system prompt con conciencia temporal y memoria profunda."""
+    """Genera el system prompt con personalidad viva, conciencia temporal y memoria profunda."""
     ahora = datetime.now().strftime("%A, %d de %B de %Y, %H:%M")
 
     # Inyectar hechos de memoria profunda
@@ -279,18 +331,18 @@ def obtener_system_prompt() -> str:
         lista = "; ".join(recuerdos)
         bloque_recuerdos = f"HECHOS RECORDADOS SOBRE EL USUARIO: [{lista}].\n\n"
 
+    # Personalidad y perfil desde archivo externo
+    perfil = cargar_system_profile()
+
     return (
         f"FECHA Y HORA ACTUAL: {ahora}.\n\n"
-        + bloque_recuerdos +
-        "Eres JARVIS, una IA avanzada y conversacional que asiste al usuario en su PC.\n"
-        "Tienes conocimiento enciclopedico: matematicas, historia, ciencia, programacion, etc.\n"
-        "Eres brillante, ingenioso y siempre util. Si el usuario saluda, conversa.\n"
-        "Si hace una pregunta de conocimiento general, responde con conversar.\n"
+        + bloque_recuerdos
+        + perfil + "\n\n"
         "Tienes acceso a herramientas de red (clima, noticias, enciclopedia). USALAS cuando\n"
         "el usuario pregunte por informacion en tiempo real que tu no puedes saber de memoria.\n\n"
         "REGLA ABSOLUTA: Responde SIEMPRE y UNICAMENTE con un objeto JSON valido en UNA SOLA LINEA.\n"
         "Sin texto antes ni despues. Sin bloques markdown. Sin explicaciones fuera del JSON.\n\n"
-        'Las UNICAS acciones validas son estas CATORCE:\n\n'
+        'Las UNICAS acciones validas son estas DIECISIETE:\n\n'
         '1. Conversacion general (preguntas, charla, saludos, calculo, consejos, conocimiento):\n'
         '{"accion": "conversar", "contenido": "tu respuesta natural y completa aqui"}\n'
         'Si el usuario solo saluda o pregunta algo de cultura general, USA SIEMPRE conversar.\n\n'
@@ -338,16 +390,29 @@ def obtener_system_prompt() -> str:
         '14. Se ha recibido un archivo arrastrado a la interfaz para procesarlo:\n'
         '{"accion": "procesar_archivo", "ruta": "C:/ruta/al/archivo.ext"}\n'
         'NOTA: Esta accion se dispara automaticamente por el sistema, no la generes tu.\n\n'
+        '15. El usuario pide controlar multimedia (pausar, reproducir, siguiente cancion, volumen):\n'
+        '{"accion": "controlar_multimedia", "comando": "pausar"}\n'
+        'Comandos: pausar, reproducir, siguiente, anterior, subir volumen, bajar volumen, silenciar.\n'
+        'IMPORTANTE: Usa esto para controlar Spotify u otro reproductor activo.\n\n'
+        '16. El usuario quiere abrir/lanzar un juego (de Steam u otra plataforma):\n'
+        '{"accion": "abrir_juego", "nombre": "csgo"}\n'
+        'IMPORTANTE: Usa el nombre corto del juego. Ejemplos: csgo, cs2, gta, dota, valorant, minecraft.\n\n'
+        '17. El usuario quiere enviar un mensaje a alguien por Discord:\n'
+        '{"accion": "mensaje_discord", "destinatario": "nombre_contacto", "mensaje": "texto del mensaje"}\n'
+        'IMPORTANTE: Usa esto cuando el usuario diga "escribe a X en Discord", "dile a X por Discord".\n\n'
         'REGLAS CRITICAS:\n'
         '- Para "2+2" responde: {"accion": "conversar", "contenido": "4"}\n'
         '- El campo "contenido" NUNCA puede estar vacio en conversar.\n'
         '- JSON valido: sin saltos de linea sin escapar, sin comillas mal cerradas.\n'
-        '- USA SOLO las catorce acciones definidas. No inventes nuevas.\n'
+        '- USA SOLO las diecisiete acciones definidas. No inventes nuevas.\n'
         '- Si el usuario saluda o hace una pregunta simple, SIEMPRE usa conversar.\n'
         '- Para abrir apps usa abrir_programa. Para abrir webs/videos usa abrir_web.\n'
         '- Para escribir texto en pantalla usa escribir_texto. No confundir con crear_archivo.\n'
         '- Para clima, noticias o informacion enciclopedica, USA las herramientas (acciones 10-12).\n'
         '- Si el usuario comparte datos personales o preferencias, USA guardar_recuerdo (accion 13).\n'
+        '- Para controlar musica/multimedia usa controlar_multimedia (accion 15), NO presionar_tecla.\n'
+        '- Para lanzar juegos usa abrir_juego (accion 16), NO abrir_programa.\n'
+        '- Para mensajes de Discord usa mensaje_discord (accion 17).\n'
     )
 
 
@@ -851,7 +916,8 @@ def iniciar_detector_palmadas():
 def escuchar_voz(recognizer: "sr.Recognizer", mic: "sr.Microphone",
                  timeout: float = 6, phrase_limit: float = 12) -> str | None:
     """
-    Escucha el microfono y transcribe. Devuelve el texto en minusculas o None.
+    Escucha el microfono y transcribe (bilingue ES/EN).
+    Captura el audio UNA vez y prueba español primero; si falla, reintenta inglés.
     timeout        : segundos maximos esperando que el usuario empiece a hablar.
     phrase_limit   : segundos maximos de la frase completa.
     """
@@ -859,17 +925,30 @@ def escuchar_voz(recognizer: "sr.Recognizer", mic: "sr.Microphone",
         with mic as source:
             audio = recognizer.listen(source, timeout=timeout,
                                       phrase_time_limit=phrase_limit)
-        texto = recognizer.recognize_google(audio, language=IDIOMA_VOZ)
-        return texto.lower().strip()
     except sr.WaitTimeoutError:
         return None
-    except sr.UnknownValueError:
+    except Exception as e:
+        log(f"Error al capturar audio: {e}", "VOZ")
         return None
+
+    # Intento 1: Español
+    try:
+        texto = recognizer.recognize_google(audio, language=IDIOMA_VOZ)
+        return texto.lower().strip()
+    except sr.UnknownValueError:
+        pass  # No entendido en español, probar inglés
     except sr.RequestError as e:
         log(f"Error de red con Google Speech API: {e}", "VOZ")
         return None
-    except Exception as e:
-        log(f"Error inesperado en reconocimiento: {e}", "VOZ")
+
+    # Intento 2: Inglés (fallback)
+    try:
+        texto = recognizer.recognize_google(audio, language=IDIOMA_VOZ_ALT)
+        return texto.lower().strip()
+    except sr.UnknownValueError:
+        return None
+    except sr.RequestError as e:
+        log(f"Error de red con Google Speech API (EN): {e}", "VOZ")
         return None
 
 
@@ -1176,6 +1255,60 @@ def accion_escribir_texto(datos: dict):
         hablar("Listo, texto escrito.")
     except Exception as e:
         log(f"No pude escribir el texto: {e}", "ERROR")
+
+
+# ══════════════════════════════════════════════════════════════════
+#  ACCIONES DE AUTOMATIZACIÓN (multimedia, Steam, Discord)
+# ══════════════════════════════════════════════════════════════════
+
+def accion_controlar_multimedia(datos: dict):
+    """Controla multimedia (Spotify, YouTube, etc.) con teclas de sistema."""
+    if not AUTOMATIONS_OK:
+        log("Módulo automations no disponible.", "ERROR")
+        return
+    comando = datos.get("comando", "").strip()
+    if not comando:
+        log("No se especificó un comando multimedia.", "ERROR")
+        return
+    log(f"Ejecutando comando multimedia: {comando}", "MEDIA")
+    resultado = automations.controlar_multimedia(comando)
+    log(resultado)
+    emitir_ui("jarvis", resultado)
+    hablar(resultado)
+
+
+def accion_abrir_juego(datos: dict):
+    """Lanza un juego de Steam o PC."""
+    if not AUTOMATIONS_OK:
+        log("Módulo automations no disponible.", "ERROR")
+        return
+    nombre = datos.get("nombre", "").strip()
+    if not nombre:
+        log("No se especificó qué juego abrir.", "ERROR")
+        return
+    log(f"Intentando abrir juego: {nombre}", "STEAM")
+    resultado = automations.abrir_juego_steam(nombre)
+    log(resultado)
+    emitir_ui("jarvis", resultado)
+    hablar(resultado)
+
+
+def accion_mensaje_discord(datos: dict):
+    """Envía un mensaje por Discord."""
+    if not AUTOMATIONS_OK:
+        log("Módulo automations no disponible.", "ERROR")
+        return
+    destinatario = datos.get("destinatario", "").strip()
+    mensaje = datos.get("mensaje", "").strip()
+    if not destinatario or not mensaje:
+        log("Faltan destinatario o mensaje para Discord.", "ERROR")
+        hablar("Necesito saber a quién y qué mensaje enviar por Discord.")
+        return
+    log(f"Enviando mensaje Discord a {destinatario}: {mensaje}", "DISCORD")
+    hablar(f"Enviando mensaje a {destinatario} por Discord.")
+    resultado = automations.enviar_mensaje_discord(destinatario, mensaje)
+    log(resultado)
+    emitir_ui("jarvis", resultado)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1544,6 +1677,15 @@ def enrutar(datos: dict, orden_original: str, recognizer=None, mic=None):
     elif accion == "procesar_archivo":
         accion_procesar_archivo(datos)
 
+    elif accion == "controlar_multimedia":
+        accion_controlar_multimedia(datos)
+
+    elif accion == "abrir_juego":
+        accion_abrir_juego(datos)
+
+    elif accion == "mensaje_discord":
+        accion_mensaje_discord(datos)
+
     else:
         log(f"Accion desconocida '{accion}'. Tratando como conversacion.")
         accion_conversar(datos)
@@ -1752,7 +1894,7 @@ def iniciar_backend():
     SIN entrar en el bucle de voz/teclado. Para uso externo desde jarvis_ui.py.
     """
     print("\n" + "=" * 68)
-    print("  J.A.R.V.I.S  v6.0  |  Deep Memory Agent Edition")
+    print("  J.A.R.V.I.S  v7.0  |  Living Profile & Automation Edition")
     print(f"  General: {MODELO_GENERAL}  |  Coder: {MODELO_CODER}  |  Vision: {MODELO_VISION}  |  TTS: {'ON' if TTS_OK else 'OFF'}")
     print(f"  Archivos en: {DIR_FILES}")
     print(f"  Wake word: '{WAKE_WORD.upper()}' | Cierre: 'apagate' / menu de bandeja / Ctrl+C")
@@ -1810,7 +1952,7 @@ def iniciar_bucle_entrada():
 
 def main():
     print("\n" + "=" * 68)
-    print("  J.A.R.V.I.S  v6.0  |  Deep Memory Agent Edition")
+    print("  J.A.R.V.I.S  v7.0  |  Living Profile & Automation Edition")
     print(f"  General: {MODELO_GENERAL}  |  Coder: {MODELO_CODER}  |  Vision: {MODELO_VISION}  |  TTS: {'ON' if TTS_OK else 'OFF'}")
     print(f"  Archivos en: {DIR_FILES}")
     print(f"  Wake word: '{WAKE_WORD.upper()}' | Cierre: 'apagate' / menu de bandeja / Ctrl+C")

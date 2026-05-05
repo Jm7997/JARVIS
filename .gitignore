@@ -194,3 +194,5 @@ __pycache__/
 
 # Archivos de memoria y datos locales de JARVIS
 archivos_jarvis/
+
+system_profile.txt
