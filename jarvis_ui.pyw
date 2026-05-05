@@ -431,13 +431,18 @@ class VentanaHolograma(QMainWindow):
     Ventana principal sin bordes, transparente, always-on-top.
     Contiene la esfera, los subtítulos, y la telemetría.
     Soporta drag para mover y drag&drop de archivos.
+
+    Estrategia de renderizado (4 capas anti-DWM):
+      1. WindowFlags: FramelessWindowHint + NoDropShadowWindowHint
+      2. WA_TranslucentBackground: superficie de ventana 100% transparente
+      3. paintEvent personalizado: pinta fondo redondeado con anti-aliasing
+      4. Widget central sin fondo propio (lo hereda del paintEvent)
     """
 
     def __init__(self):
         super().__init__()
 
         # ── Propiedades de ventana ───────────────────────────────
-        # Capa 1: Flags — frameless + sin sombra nativa DWM
         self.setWindowTitle("JARVIS")
         self.setFixedSize(WINDOW_W, WINDOW_H)
         self.setWindowFlags(
@@ -446,28 +451,23 @@ class VentanaHolograma(QMainWindow):
             | Qt.WindowType.NoDropShadowWindowHint
             | Qt.WindowType.Tool
         )
-        # Capa 2: Atributo — superficie de ventana 100% transparente
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        # Capa 3: Stylesheet — matar cualquier fondo residual del QMainWindow
-        self.setStyleSheet("background: transparent;")
 
-        # Drag & Drop de archivos
-        self.setAcceptDrops(True)
-
-        # Variable para drag de ventana
-        self._drag_pos = None
-
-        # ── Widget central (Panel Glassmorphism) ─────────────────
+        # ── Widget central — fondo sólido que cubre toda la ventana ──
         central = QWidget(self)
         self.setCentralWidget(central)
         central.setObjectName("FondoHUD")
         central.setStyleSheet("""
             #FondoHUD {
                 background-color: rgba(12, 15, 22, 230);
-                border-radius: 20px;
                 border: 1px solid rgba(0, 210, 255, 40);
             }
         """)
+
+        # Drag & Drop de archivos
+        self.setAcceptDrops(True)
+
+        # Variable para drag de ventana
+        self._drag_pos = None
 
         layout = QVBoxLayout(central)
         layout.setContentsMargins(20, 20, 20, 20)
