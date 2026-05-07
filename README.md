@@ -13,6 +13,12 @@ Un asistente virtual de escritorio inspirado en Iron Man, creado en Python. Cuen
 * **Activación por Palmada:** Sistema de "doble palmada" para despertar el protocolo *Welcome Home*.
 * **Perfil Vivo (System Profile):** JARVIS sabe quién eres y qué te gusta gracias a un archivo de configuración local.
 * **Visión (Drag & Drop):** Arrastra imágenes a la ventana y JARVIS las analizará.
+* **Memoria SQLite:** Adiós a los archivos JSON. El historial y los recuerdos ahora se guardan en una base de datos relacional (`jarvis_memory.db`) ultrarrápida.
+* **Sistema de Plugins:** Arquitectura modular. Añade nuevas capacidades (domótica, luces, etc.) simplemente arrastrando archivos `.py` a la carpeta `/plugins`.
+* **Visualizador de Audio:** Nuevo ecualizador holográfico cian que reacciona de forma fluida mientras el asistente habla.
+* **Localización Dinámica (i18n):** La interfaz y los saludos de J.A.R.V.I.S. se adaptan automáticamente al Español o al Inglés dependiendo del modelo de voz de Piper TTS que estés usando.
+* **Autoconciencia de Modelos:** El sistema sabe exactamente qué "cerebro" está usando (Mistral, Qwen, LLaVA) eliminando alucinaciones.
+
 
 ## 🛠️ Requisitos e Instalación
 

@@ -287,27 +287,14 @@ def _discord_webhook(webhook_url: str, autor: str, mensaje: str) -> str:
 def _discord_pyautogui(destinatario: str, mensaje: str) -> str:
     """
     Envía un DM en Discord automatizando la GUI con PyAutoGUI.
-    
-    Proceso:
-    1. Enfocar Discord (Ctrl+Alt para traerlo al frente, o buscarlo)
-    2. Abrir Quick Switcher (Ctrl+K)
-    3. Escribir el nombre del destinatario
-    4. Seleccionar el contacto (Enter)
-    5. Escribir el mensaje
-    6. Enviar (Enter)
-    
-    NOTA: Este método es un boceto funcional. Depende de:
-    - Discord estar abierto y logueado
-    - El destinatario estar en la lista de amigos/servidores
-    - La velocidad del PC (los time.sleep son aproximados)
+    Requiere Discord abierto y el destinatario en amigos/servidores.
     """
     if not PYAUTOGUI_OK:
         return "No puedo controlar Discord sin pyautogui instalado."
 
     try:
-        # 1. Traer Discord al frente
-        #    Intentar con el atajo de Windows: Win + buscar Discord
-        pyautogui.hotkey('win', '1')  # Fallback genérico
+        # Traer Discord al frente
+        pyautogui.hotkey('win', '1')
         time.sleep(0.3)
 
         # Buscar y enfocar Discord usando la barra de tareas
@@ -318,24 +305,19 @@ def _discord_pyautogui(destinatario: str, mensaje: str) -> str:
         pyautogui.press('enter')
         time.sleep(2.0)  # Esperar a que Discord esté en primer plano
 
-        # 2. Abrir Quick Switcher (Ctrl+K) para buscar contacto
+        # Quick Switcher para buscar contacto
         pyautogui.hotkey('ctrl', 'k')
         time.sleep(0.8)
 
-        # 3. Escribir nombre del destinatario
         pyautogui.write(destinatario, interval=0.03)
-        time.sleep(1.0)  # Esperar resultados de búsqueda
+        time.sleep(1.0)
 
-        # 4. Seleccionar primer resultado
         pyautogui.press('enter')
-        time.sleep(1.0)  # Esperar a que cargue la conversación
+        time.sleep(1.0)
 
-        # 5. Escribir el mensaje en el campo de texto
-        #    El foco debería estar en el campo de mensaje automáticamente
         pyautogui.write(mensaje, interval=0.02)
         time.sleep(0.3)
 
-        # 6. Enviar
         pyautogui.press('enter')
 
         return f"Mensaje enviado a {destinatario} por Discord. Verifique que llegó correctamente, señor."

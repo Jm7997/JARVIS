@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║       J.A.R.V.I.S  v6.0  –  Deep Memory Agent UI                ║
+║       J.A.R.V.I.S  v1.2.0  –  Deep Memory Agent UI              ║
 ║  PyQt6 · Transparent · Reactive Sphere · HUD Telemetry          ║
 ║                                                                  ║
 ║  Ejecutar:  python jarvis_ui.py                                  ║
@@ -382,11 +382,38 @@ class TelemetriaHUD(QLabel):
 # ══════════════════════════════════════════════════════════════════
 
 class EstadoLabel(QLabel):
-    """Mini etiqueta que muestra el estado actual del sistema."""
+    """Mini etiqueta que muestra el estado actual del sistema (con localización dinámica)."""
+
+    # Diccionarios de traducción por idioma
+    _TRADUCCIONES = {
+        "es": {
+            "escuchando": ("● ESCUCHANDO",  "rgba(0, 210, 255, 140)"),
+            "pensando":   ("◆ PROCESANDO",  "rgba(255, 140, 0, 180)"),
+            "hablando":   ("◉ HABLANDO",    "rgba(240, 240, 255, 180)"),
+            "coder":      ("⚡ CODER MODE", "rgba(0, 230, 118, 180)"),
+            "vision":     ("◎ VISIÓN",      "rgba(160, 60, 255, 200)"),
+        },
+        "en": {
+            "escuchando": ("● LISTENING",   "rgba(0, 210, 255, 140)"),
+            "pensando":   ("◆ PROCESSING",  "rgba(255, 140, 0, 180)"),
+            "hablando":   ("◉ SPEAKING",    "rgba(240, 240, 255, 180)"),
+            "coder":      ("⚡ CODER MODE", "rgba(0, 230, 118, 180)"),
+            "vision":     ("◎ VISION",      "rgba(160, 60, 255, 200)"),
+        },
+    }
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setWordWrap(True)
+        self.setMinimumWidth(260)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+
+        # Leer idioma del backend (autodetectado desde el modelo Piper TTS)
+        self._idioma = getattr(jarvis, "IDIOMA_UI", "es")
+        if self._idioma not in self._TRADUCCIONES:
+            self._idioma = "es"  # Fallback seguro
+
         self.setStyleSheet("""
             QLabel {
                 color: rgba(0, 210, 255, 120);
@@ -398,17 +425,16 @@ class EstadoLabel(QLabel):
                 background: transparent;
             }
         """)
-        self.setText("● ESCUCHANDO")
+
+        # Texto inicial en el idioma correcto
+        texto_inicial = self._TRADUCCIONES[self._idioma]["escuchando"][0]
+        self.setText(texto_inicial)
 
     def set_estado(self, estado: str):
-        estados = {
-            "escuchando": ("● ESCUCHANDO", "rgba(0, 210, 255, 140)"),
-            "pensando":   ("◆ PROCESANDO", "rgba(255, 140, 0, 180)"),
-            "hablando":   ("◉ HABLANDO",   "rgba(240, 240, 255, 180)"),
-            "coder":      ("⚡ CODER MODE", "rgba(0, 230, 118, 180)"),
-            "vision":     ("◎ VISIÓN",     "rgba(160, 60, 255, 200)"),
-        }
-        texto, color = estados.get(estado, ("● ESCUCHANDO", "rgba(0, 210, 255, 140)"))
+        """Actualiza el label con el texto localizado para el estado dado."""
+        tabla = self._TRADUCCIONES.get(self._idioma, self._TRADUCCIONES["es"])
+        default = tabla["escuchando"]
+        texto, color = tabla.get(estado, default)
         self.setText(texto)
         self.setStyleSheet(f"""
             QLabel {{
@@ -420,6 +446,88 @@ class EstadoLabel(QLabel):
                 background: transparent;
             }}
         """)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  VISUALIZADOR DE AUDIO (Ecualizador Holográfico)
+# ══════════════════════════════════════════════════════════════════
+
+class VisualizadorAudio(QWidget):
+    """Barras de ecualizador holográfico — activas solo al hablar."""
+
+    NUM_BARRAS = 16
+    COLOR_BARRA = QColor(0, 230, 255)  # Cian brillante
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(50)
+        self.setMinimumWidth(220)
+
+        self._activo = False
+        self._tick = 0.0
+
+        # Opacidad para fade-in/fade-out
+        self._opacity = QGraphicsOpacityEffect(self)
+        self._opacity.setOpacity(0.0)
+        self.setGraphicsEffect(self._opacity)
+
+        self._fade_anim = QPropertyAnimation(self._opacity, b"opacity")
+        self._fade_anim.setEasingCurve(QEasingCurve.Type.InOutCubic)
+
+        # Timer de animación (~30fps)
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._animar)
+        self._timer.start(33)
+
+    def set_estado(self, estado: str):
+        """Activa/desactiva la animación según el estado."""
+        nuevo_activo = (estado == "hablando")
+        if nuevo_activo != self._activo:
+            self._activo = nuevo_activo
+            self._fade_anim.stop()
+            self._fade_anim.setStartValue(self._opacity.opacity())
+            self._fade_anim.setEndValue(1.0 if nuevo_activo else 0.0)
+            self._fade_anim.setDuration(300 if nuevo_activo else 600)
+            self._fade_anim.start()
+
+    def _animar(self):
+        """Tick de animación — solo actualiza si está activo."""
+        if self._activo:
+            self._tick += 0.12
+            self.update()
+
+    def paintEvent(self, event):
+        """Pinta las barras de ecualizador."""
+        if self._opacity.opacity() < 0.01:
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = self.width()
+        h = self.height()
+        bar_w = max(2, (w - (self.NUM_BARRAS - 1) * 3) // self.NUM_BARRAS)
+        total_w = self.NUM_BARRAS * bar_w + (self.NUM_BARRAS - 1) * 3
+        x_offset = (w - total_w) / 2
+
+        for i in range(self.NUM_BARRAS):
+            if self._activo:
+                amp = 0.3 + 0.7 * abs(math.sin(self._tick + i * 0.45))
+            else:
+                amp = 0.1
+
+            bar_h = max(2, int(h * amp * 0.85))
+            x = x_offset + i * (bar_w + 3)
+            y = h - bar_h
+
+            color = QColor(self.COLOR_BARRA)
+            color.setAlpha(int(140 + 80 * amp))
+
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QBrush(color))
+            painter.drawRoundedRect(QRectF(x, y, bar_w, bar_h), 1.5, 1.5)
+
+        painter.end()
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -483,7 +591,11 @@ class VentanaHolograma(QMainWindow):
 
         # Etiqueta de estado
         self._estado_label = EstadoLabel(self)
-        layout.addWidget(self._estado_label, alignment=Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(self._estado_label, alignment=Qt.AlignmentFlag.AlignCenter)
+
+        # Visualizador de audio (ecualizador holográfico)
+        self._audio_viz = VisualizadorAudio(self)
+        layout.addWidget(self._audio_viz, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         # Subtítulos dinámicos
         self._subtitulos = SubtituloLabel(self)
@@ -557,6 +669,7 @@ class VentanaHolograma(QMainWindow):
             if tipo == "estado":
                 self._esfera.set_estado(datos)
                 self._estado_label.set_estado(datos)
+                self._audio_viz.set_estado(datos)
 
             elif tipo == "usuario":
                 self._subtitulos.mostrar_usuario(datos)

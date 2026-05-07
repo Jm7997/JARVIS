@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║       J.A.R.V.I.S  v7.0  –  Living Profile & Automation         ║
+║       J.A.R.V.I.S  v1.2.0  –  Living Profile & Automation       ║
 ║  Powered by Ollama · Mistral-Nemo · Qwen2.5-Coder · LLaVA      ║
 ║  Acciones: conversar · crear_archivo · borrar_archivo            ║
 ║            · ver_pantalla · presionar_tecla · abrir_web          ║
@@ -37,17 +37,17 @@ import requests
 import xml.etree.ElementTree as ET
 import tempfile
 
+import jarvis_memory
+import plugin_manager
+
 try:
     import wikipedia
-    wikipedia.set_lang("es")
+    # El idioma se configura en iniciar_backend() cuando IDIOMA_UI ya está definido
     WIKIPEDIA_OK = True
 except ImportError:
     WIKIPEDIA_OK = False
 
 
-# ══════════════════════════════════════════════════════════════════
-#  IMPORTACIONES OPCIONALES — el script arranca aunque falten
-# ══════════════════════════════════════════════════════════════════
 
 _avisos_inicio: list[str] = []
 
@@ -142,15 +142,13 @@ except ImportError:
     )
 
 
-# ══════════════════════════════════════════════════════════════════
-#  CONFIGURACION
-# ══════════════════════════════════════════════════════════════════
+# ── Configuración ────────────────────────────────────────────────
 
 MODELO_GENERAL = "mistral-nemo"
 MODELO_CODER   = "qwen2.5-coder:7b"
 MODELO_VISION  = "llava"
 
-# Palabras clave que activan el modo Coder (Qwen2.5-Coder)
+# Palabras clave que activan el modelo Coder
 PALABRAS_CODIGO = {
     "código", "codigo", "python", "script", "programar", "programación",
     "html", "css", "javascript", "error", "función", "funcion", "variable",
@@ -166,16 +164,14 @@ def elegir_modelo(orden: str) -> str:
         return MODELO_CODER
     return MODELO_GENERAL
 
-# Idiomas para el reconocimiento de voz (Google Speech API)
-# Intento dual: primero español, fallback a inglés sobre el mismo audio
+# Reconocimiento de voz bilingüe
 IDIOMA_VOZ     = "es-ES"
 IDIOMA_VOZ_ALT = "en-US"
 
 # Palabra clave que activa JARVIS
 WAKE_WORD = "jarvis"
 
-# --- Deteccion de palmadas ---
-# Parametros calibrados para palmadas rapidas y fuertes (estilo Tony Stark)
+# Detección de palmadas — calibrado para palmadas rápidas y fuertes
 CLAP_THRESHOLD   = 0.45   # Amplitud minima absoluta para candidato a palmada
 CLAP_DEBOUNCE    = 0.20   # Segundos minimos entre dos picos (muy bajo para palmadas rapidas)
 CLAP_WINDOW      = 1.0   # Ventana maxima (seg) en la que deben ocurrir 2 palmadas
@@ -187,7 +183,7 @@ SAMPLE_RATE      = 44100
 BLOCK_SIZE       = 512    # Bloques pequenos = reaccion mas rapida a transitorios
 CLAP_DEBUG       = True   # Mostrar metricas de audio en consola para depurar
 
-# --- Mapeo de palabras -> tecla pyautogui (ES + EN) ---
+# Mapeo de comandos de voz → tecla pyautogui
 MAPA_TECLAS: dict[str, str] = {
     # Reproduccion (ES)
     "pausa"       : "space",
@@ -229,27 +225,10 @@ FRASES_CIERRE = {"apagate", "apágate", "cerrar sistema", "cierra el sistema",
                  "apagarse", "shutdown", "termina", "terminar sistema",
                  "shut down", "turn off", "power off", "good bye", "goodbye"}
 
-# Frases de despedida aleatorias
-DESPEDIDAS = [
-    "Hasta pronto, señor. Estaré aquí cuando me necesite.",
-    "Apagando sistemas. Fue un placer asistirle hoy.",
-    "Cerrando núcleo. Que tenga un excelente día, señor.",
-    "Sistemas desconectados. Descanse, yo vigilaré en sueños.",
-    "Entendido. Me retiro por ahora. Llámeme cuando quiera.",
-    "Apagando motores. Ha sido un honor servirle hoy.",
-    "Nos vemos pronto, señor. JARVIS fuera.",
-    "Desactivando protocolos. Cuídese, señor.",
-    "Roger that. Entrando en modo hibernación. Hasta la próxima.",
-    "Adiós por ahora. Recuerde, estoy a dos palmadas de distancia.",
-    "Cerrando sesión. El placer fue mío, como siempre.",
-    "Buenas noches, señor. O buenos días. O lo que sea. Me apago.",
-]
-
 DIR_BASE        = Path(__file__).parent.resolve()
 DIR_FILES       = DIR_BASE / "archivos_jarvis"
 DIR_FILES.mkdir(exist_ok=True)
-ARCHIVO_MEMORIA = DIR_FILES / "memoria.json"
-ARCHIVO_MEMORIA_PROFUNDA = DIR_FILES / "memoria_profunda.json"
+
 ARCHIVO_PROFILE  = DIR_BASE / "system_profile.txt"
 TEMP_SCREENSHOT = DIR_BASE / "temp_vision.png"
 PIPER_DIR       = DIR_BASE / "piper"
@@ -260,16 +239,116 @@ TEMP_TTS = Path(tempfile.gettempdir()) / "jarvis_temp_tts.wav"
 PIPER_BIN_OK   = PIPER_BIN.exists()
 PIPER_MODEL_OK = PIPER_MODEL.exists()
 PIPER_TTS_OK   = AUDIO_OK and SOUNDFILE_OK and PIPER_BIN_OK and PIPER_MODEL_OK
-TTS_OK         = PIPER_TTS_OK  # Legacy name; TTS_OK ahora refleja disponibilidad de Piper
+TTS_OK         = PIPER_TTS_OK
+
+# Idioma de la UI — autodetectado desde el nombre del modelo Piper
+# Convención Piper: "es_ES-davefx-medium.onnx" → "es", "en_US-amy-medium.onnx" → "en"
+IDIOMA_UI = PIPER_MODEL.stem.split("-")[0][:2] if PIPER_MODEL_OK else "es"
 
 
-# ══════════════════════════════════════════════════════════════════
-#  ESTADO GLOBAL (thread-safe)
-# ══════════════════════════════════════════════════════════════════
+# ── Localización centralizada ─────────────────────────────────────
+# Todas las frases que JARVIS dice por sí mismo (no generadas por el LLM).
+# Para añadir un idioma: agregar una clave al dict con las mismas keys.
 
-historial:     list[dict]  = []
+_DESPEDIDAS = {
+    "es": [
+        "Hasta pronto, señor. Estaré aquí cuando me necesite.",
+        "Apagando sistemas. Fue un placer asistirle hoy.",
+        f"Desconectando núcleo {MODELO_GENERAL}. Que tenga un excelente día, señor.",
+        "Sistemas desconectados. Descanse, yo vigilaré en sueños.",
+        "Entendido. Me retiro por ahora. Llámeme cuando quiera.",
+        "Apagando motores. Ha sido un honor servirle hoy.",
+        "Nos vemos pronto, señor. JARVIS fuera.",
+        "Desactivando protocolos. Cuídese, señor.",
+        "Roger that. Entrando en modo hibernación. Hasta la próxima.",
+        "Adiós por ahora. Recuerde, estoy a dos palmadas de distancia.",
+        "Cerrando sesión. El placer fue mío, como siempre.",
+        "Buenas noches, señor. O buenos días. O lo que sea. Me apago.",
+    ],
+    "en": [
+        "See you soon, sir. I'll be here when you need me.",
+        "Powering down. It was a pleasure assisting you today.",
+        f"Disconnecting {MODELO_GENERAL} core. Have an excellent day, sir.",
+        "Systems offline. Rest well, I'll keep watch in standby.",
+        "Understood. Stepping down for now. Call me anytime.",
+        "Shutting down engines. It's been an honor serving you today.",
+        "See you soon, sir. JARVIS out.",
+        "Deactivating protocols. Take care, sir.",
+        "Roger that. Entering hibernation mode. Until next time.",
+        "Goodbye for now. Remember, I'm just two claps away.",
+        "Closing session. The pleasure was mine, as always.",
+        "Good night, sir. Or good morning. Whatever. Shutting down.",
+    ],
+}
+DESPEDIDAS = _DESPEDIDAS.get(IDIOMA_UI, _DESPEDIDAS["es"])
+
+_TEXTOS = {
+    "es": {
+        # Acciones generales
+        "abriendo_navegador":       "Listo, abriendo en el navegador.",
+        "abriendo_programa":        "Abriendo {nombre}, señor.",
+        "cerrando_programa":        "Cerrando {nombre}, señor.",
+        "texto_escrito":            "Listo, texto escrito.",
+        # Memoria
+        "recuerdo_guardado":        "Recuerdo guardado, señor.",
+        "recuerdo_duplicado":       "Eso ya lo tenía apuntado, señor.",
+        "buscar_recuerdos_vacio":   "No escuché qué quieres que busque en mis recuerdos.",
+        "sin_recuerdos":            "No encontré nada en mis recuerdos sobre '{query}', señor.",
+        # Clima / noticias / info
+        "clima_sin_ciudad":         "No escuché la ciudad. ¿De qué ciudad quieres saber el clima?",
+        "clima_error":              "Lo siento, no pude consultar el clima de {ciudad} en este momento.",
+        "noticias_error":           "Lo siento, no pude acceder a las noticias en este momento.",
+        "noticias_parse_error":     "Hubo un problema leyendo las noticias. Intenta de nuevo.",
+        "buscar_sin_termino":       "No escuché qué quieres que busque. ¿Puedes repetirlo?",
+        "buscar_sin_acceso":        "No tengo acceso a la enciclopedia en este momento.",
+        "buscar_error":             "No pude buscar información sobre {consulta} en este momento.",
+        # Discord
+        "discord_faltan_datos":     "Necesito saber a quién y qué mensaje enviar por Discord.",
+        "discord_enviando":         "Enviando mensaje a {destinatario} por Discord.",
+        # Archivos (drag & drop)
+        "archivo_no_encontrado":    "No encuentro el archivo {nombre}, señor.",
+        "analizando_imagen":        "Analizando la imagen {nombre}, señor.",
+        "imagen_error":             "No pude analizar la imagen, señor.",
+        "archivo_leido":            "Archivo leído, señor. ¿Qué desea que haga con él?",
+        "archivo_leer_error":       "No pude leer el archivo {nombre}, señor.",
+        "archivo_no_soportado":     "No sé cómo procesar archivos {ext}, señor.",
+    },
+    "en": {
+        "abriendo_navegador":       "Done, opening in the browser.",
+        "abriendo_programa":        "Opening {nombre}, sir.",
+        "cerrando_programa":        "Closing {nombre}, sir.",
+        "texto_escrito":            "Done, text typed.",
+        "recuerdo_guardado":        "Memory saved, sir.",
+        "recuerdo_duplicado":       "I already had that noted, sir.",
+        "buscar_recuerdos_vacio":   "I didn't catch what you want me to search in my memories.",
+        "sin_recuerdos":            "I couldn't find anything in my memories about '{query}', sir.",
+        "clima_sin_ciudad":         "I didn't hear the city. Which city do you want weather for?",
+        "clima_error":              "Sorry, I couldn't check the weather for {ciudad} right now.",
+        "noticias_error":           "Sorry, I couldn't access the news right now.",
+        "noticias_parse_error":     "There was a problem reading the news. Try again.",
+        "buscar_sin_termino":       "I didn't hear what you want me to search. Can you repeat?",
+        "buscar_sin_acceso":        "I don't have access to the encyclopedia right now.",
+        "buscar_error":             "I couldn't search for information about {consulta} right now.",
+        "discord_faltan_datos":     "I need to know who to send to and what message via Discord.",
+        "discord_enviando":         "Sending message to {destinatario} via Discord.",
+        "archivo_no_encontrado":    "I can't find the file {nombre}, sir.",
+        "analizando_imagen":        "Analyzing image {nombre}, sir.",
+        "imagen_error":             "I couldn't analyze the image, sir.",
+        "archivo_leido":            "File read, sir. What would you like me to do with it?",
+        "archivo_leer_error":       "I couldn't read file {nombre}, sir.",
+        "archivo_no_soportado":     "I don't know how to process {ext} files, sir.",
+    },
+}
+
+
+def _T(clave: str, **kwargs) -> str:
+    """Devuelve el texto localizado para la clave dada, formateado con kwargs."""
+    tabla = _TEXTOS.get(IDIOMA_UI, _TEXTOS["es"])
+    texto = tabla.get(clave, _TEXTOS["es"].get(clave, clave))
+    return texto.format(**kwargs) if kwargs else texto
+
+
 accion_queue:  queue.Queue = queue.Queue()   # Acciones disparadas por palmadas
-historial_lock = threading.Lock()
 running        = threading.Event()
 running.set()
 
@@ -291,23 +370,34 @@ def emitir_ui(tipo: str, datos: str = ""):
         pass  # Nunca romper el backend por un fallo de UI
 
 
-# ══════════════════════════════════════════════════════════════════
-#  SYSTEM PROFILE — Personalidad cargada desde archivo externo
-# ══════════════════════════════════════════════════════════════════
-
 _PROFILE_DEFAULT = (
     "Eres JARVIS, una IA avanzada y conversacional que asiste al usuario en su PC.\n"
     "Eres brillante, ingenioso y siempre util. Responde de forma concisa y natural.\n"
 )
 
+# Cache del perfil en RAM — se carga UNA vez del disco en iniciar_backend()
+_profile_cache: str | None = None
+
+
 def cargar_system_profile() -> str:
-    """Lee el archivo system_profile.txt. Devuelve perfil por defecto si no existe."""
+    """Devuelve el perfil cacheado en RAM. Si no está cacheado, lo carga del disco."""
+    global _profile_cache
+    if _profile_cache is not None:
+        return _profile_cache
+    # Primera carga (o recarga): leer del disco y cachear
+    _profile_cache = _leer_profile_de_disco()
+    return _profile_cache
+
+
+def _leer_profile_de_disco() -> str:
+    """Lee system_profile.txt del disco. Solo se llama 1 vez al arranque."""
     if not ARCHIVO_PROFILE.exists():
-        log(f"system_profile.txt no encontrado en {ARCHIVO_PROFILE}. Usando perfil por defecto.", "PROFILE")
+        log("system_profile.txt no encontrado. Usando perfil por defecto.", "PROFILE")
         return _PROFILE_DEFAULT
     try:
         contenido = ARCHIVO_PROFILE.read_text(encoding="utf-8").strip()
         if not contenido:
+            log("system_profile.txt está vacío. Usando perfil por defecto.", "PROFILE")
             return _PROFILE_DEFAULT
         log(f"Perfil cargado desde {ARCHIVO_PROFILE.name} ({len(contenido)} chars).", "PROFILE")
         return contenido
@@ -316,33 +406,43 @@ def cargar_system_profile() -> str:
         return _PROFILE_DEFAULT
 
 
-# ══════════════════════════════════════════════════════════════════
-#  PROMPT DE SISTEMA (DINÁMICO — profile + fecha/hora + memoria)
-# ══════════════════════════════════════════════════════════════════
+def recargar_profile():
+    """Recarga el perfil del disco sin reiniciar JARVIS (hot-reload)."""
+    global _profile_cache
+    _profile_cache = None  # Invalidar cache
+    perfil = cargar_system_profile()
+    log(f"Perfil recargado en caliente ({len(perfil)} chars).", "PROFILE")
+    return perfil
+
 
 def obtener_system_prompt() -> str:
-    """Genera el system prompt con personalidad viva, conciencia temporal y memoria profunda."""
+    """Genera el system prompt con personalidad, contexto temporal y hechos del usuario."""
     ahora = datetime.now().strftime("%A, %d de %B de %Y, %H:%M")
 
-    # Inyectar hechos de memoria profunda
-    recuerdos = cargar_memoria_profunda()
+    hechos = jarvis_memory.cargar_hechos()
     bloque_recuerdos = ""
-    if recuerdos:
-        lista = "; ".join(recuerdos)
+    if hechos:
+        lista = "; ".join(hechos)
         bloque_recuerdos = f"HECHOS RECORDADOS SOBRE EL USUARIO: [{lista}].\n\n"
 
-    # Personalidad y perfil desde archivo externo
-    perfil = cargar_system_profile()
+    perfil = cargar_system_profile()  # Lee de RAM (0 I/O)
+
+    # Acciones de plugins (vacío si no hay)
+    bloque_plugins = plugin_manager.get_plugins_system_prompt()
 
     return (
         f"FECHA Y HORA ACTUAL: {ahora}.\n\n"
+        f"TU IDENTIDAD TÉCNICA: Eres JARVIS. Tu motor lógico principal es {MODELO_GENERAL}, "
+        f"tu módulo de código es {MODELO_CODER}, y tu módulo de visión es {MODELO_VISION}. "
+        f"Si el usuario pregunta qué modelo usas o qué IA eres, usa estos datos reales. "
+        f"NUNCA inventes nombres de modelo ni digas que usas otro motor.\n\n"
         + bloque_recuerdos
         + perfil + "\n\n"
         "Tienes acceso a herramientas de red (clima, noticias, enciclopedia). USALAS cuando\n"
         "el usuario pregunte por informacion en tiempo real que tu no puedes saber de memoria.\n\n"
         "REGLA ABSOLUTA: Responde SIEMPRE y UNICAMENTE con un objeto JSON valido en UNA SOLA LINEA.\n"
         "Sin texto antes ni despues. Sin bloques markdown. Sin explicaciones fuera del JSON.\n\n"
-        'Las UNICAS acciones validas son estas DIECISIETE:\n\n'
+        'Las UNICAS acciones validas son estas DIECIOCHO (mas las de plugins instalados):\n\n'
         '1. Conversacion general (preguntas, charla, saludos, calculo, consejos, conocimiento):\n'
         '{"accion": "conversar", "contenido": "tu respuesta natural y completa aqui"}\n'
         'Si el usuario solo saluda o pregunta algo de cultura general, USA SIEMPRE conversar.\n\n'
@@ -400,11 +500,16 @@ def obtener_system_prompt() -> str:
         '17. El usuario quiere enviar un mensaje a alguien por Discord:\n'
         '{"accion": "mensaje_discord", "destinatario": "nombre_contacto", "mensaje": "texto del mensaje"}\n'
         'IMPORTANTE: Usa esto cuando el usuario diga "escribe a X en Discord", "dile a X por Discord".\n\n'
-        'REGLAS CRITICAS:\n'
+        '18. El usuario pregunta por algo que ya te conto antes (recuerdos, conversaciones pasadas):\n'
+        '{"accion": "consultar_memoria", "query": "terminos a buscar en el historial"}\n'
+        'IMPORTANTE: Usa esto cuando el usuario diga "recuerdas que...", "te dije que...", "antes te\n'
+        'comente...", o pregunte por datos que te compartio en sesiones anteriores.\n\n'
+        + bloque_plugins
+        + 'REGLAS CRITICAS:\n'
         '- Para "2+2" responde: {"accion": "conversar", "contenido": "4"}\n'
         '- El campo "contenido" NUNCA puede estar vacio en conversar.\n'
         '- JSON valido: sin saltos de linea sin escapar, sin comillas mal cerradas.\n'
-        '- USA SOLO las diecisiete acciones definidas. No inventes nuevas.\n'
+        '- USA SOLO las acciones definidas (incluyendo las de plugins). No inventes otras.\n'
         '- Si el usuario saluda o hace una pregunta simple, SIEMPRE usa conversar.\n'
         '- Para abrir apps usa abrir_programa. Para abrir webs/videos usa abrir_web.\n'
         '- Para escribir texto en pantalla usa escribir_texto. No confundir con crear_archivo.\n'
@@ -413,79 +518,14 @@ def obtener_system_prompt() -> str:
         '- Para controlar musica/multimedia usa controlar_multimedia (accion 15), NO presionar_tecla.\n'
         '- Para lanzar juegos usa abrir_juego (accion 16), NO abrir_programa.\n'
         '- Para mensajes de Discord usa mensaje_discord (accion 17).\n'
+        '- Para recuperar recuerdos del pasado usa consultar_memoria (accion 18).\n'
     )
 
-
-# ══════════════════════════════════════════════════════════════════
-#  LOG UTIL
-# ══════════════════════════════════════════════════════════════════
 
 def log(msg: str, prefijo: str = "JARVIS"):
     ts = datetime.now().strftime("%H:%M:%S")
     print(f"\r  [{ts}] {prefijo}: {msg}")
 
-
-# ══════════════════════════════════════════════════════════════════
-#  MEMORIA A LARGO PLAZO (persistencia en JSON)
-# ══════════════════════════════════════════════════════════════════
-
-def cargar_memoria():
-    """Carga el historial desde ARCHIVO_MEMORIA si existe."""
-    global historial
-    if not ARCHIVO_MEMORIA.exists():
-        log("No se encontró archivo de memoria previo. Empezando con historial vacío.", "MEMORIA")
-        return
-    try:
-        with open(ARCHIVO_MEMORIA, "r", encoding="utf-8") as f:
-            datos = json.load(f)
-        if isinstance(datos, list):
-            with historial_lock:
-                historial = datos
-            log(f"Memoria cargada: {len(datos)} mensajes recuperados de {ARCHIVO_MEMORIA.name}", "MEMORIA")
-        else:
-            log("El archivo de memoria no contiene una lista válida. Ignorando.", "MEMORIA")
-    except json.JSONDecodeError as e:
-        log(f"Error al parsear memoria JSON: {e}", "MEMORIA")
-    except Exception as e:
-        log(f"Error al cargar memoria: {e}", "MEMORIA")
-
-
-def guardar_memoria():
-    """Guarda el historial actual en ARCHIVO_MEMORIA (thread-safe)."""
-    try:
-        with historial_lock:
-            copia = list(historial)
-        with open(ARCHIVO_MEMORIA, "w", encoding="utf-8") as f:
-            json.dump(copia, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        log(f"Error al guardar memoria: {e}", "MEMORIA")
-
-
-# ══════════════════════════════════════════════════════════════════
-#  MEMORIA PROFUNDA (RAG Simple — hechos persistentes sobre el usuario)
-# ══════════════════════════════════════════════════════════════════
-
-def cargar_memoria_profunda() -> list[str]:
-    """Lee los hechos almacenados en memoria_profunda.json."""
-    if not ARCHIVO_MEMORIA_PROFUNDA.exists():
-        return []
-    try:
-        with open(ARCHIVO_MEMORIA_PROFUNDA, "r", encoding="utf-8") as f:
-            datos = json.load(f)
-        if isinstance(datos, list):
-            return datos
-    except Exception as e:
-        log(f"Error al cargar memoria profunda: {e}", "MEMORIA")
-    return []
-
-
-def guardar_memoria_profunda(recuerdos: list[str]):
-    """Persiste la lista de hechos en memoria_profunda.json."""
-    try:
-        with open(ARCHIVO_MEMORIA_PROFUNDA, "w", encoding="utf-8") as f:
-            json.dump(recuerdos, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        log(f"Error al guardar memoria profunda: {e}", "MEMORIA")
 
 # ══════════════════════════════════════════════════════════════════
 #  TTS — LA BOCA DE JARVIS (Piper + sounddevice, hilo worker dedicado)
@@ -525,21 +565,21 @@ def _descubrir_voz():
 
 
 def _hablar_una_vez(texto: str):
-    """
-    Sintetiza con Piper en archivo temporal y reproduce con sounddevice.
-    """
+    """Sintetiza con Piper y reproduce con sounddevice."""
     if not TTS_OK:
         log("TTS deshabilitado. Revisa dependencias y rutas de Piper.", "VOZ")
         return
-        
+
+    # Limpiar caracteres problemáticos para Piper (IPA, emojis, corchetes, etc.)
+    texto = limpiar_texto_tts(texto)
+    if not texto:
+        log("Texto vacío tras limpieza TTS. Nada que sintetizar.", "VOZ")
+        return
+
     try:
-        # 1. Generar comando y ejecutar Piper
         comando = [
-            str(PIPER_BIN),
-            "--model",
-            str(PIPER_MODEL),
-            "--output_file",
-            str(TEMP_TTS),
+            str(PIPER_BIN), "--model", str(PIPER_MODEL),
+            "--output_file", str(TEMP_TTS),
         ]
         resultado = subprocess.run(
             comando,
@@ -554,21 +594,17 @@ def _hablar_una_vez(texto: str):
             log(f"Piper falló o no generó audio. Código: {resultado.returncode}", "ERROR")
             return
 
-        # 2. Leer el audio generado
         audio, sample_rate = sf.read(str(TEMP_TTS), dtype="float32")
-        
-        # 3. Reproducir
         sd.play(audio, sample_rate)
         sd.wait()
         
     except Exception as e:
         log(f"Error al ejecutar TTS: {type(e).__name__}: {e}", "ERROR")
     finally:
-        # 4. DESTRUCCIÓN DE PRUEBAS (Se ejecuta siempre, pase lo que pase)
         try:
             if TEMP_TTS.exists():
-                time.sleep(0.1)  # Respiro de 100ms para que sounddevice suelte el archivo
-                TEMP_TTS.unlink() # Borra el archivo del disco duro
+                time.sleep(0.1)
+                TEMP_TTS.unlink()
         except Exception:
             pass
 
@@ -616,18 +652,12 @@ def hablar(texto: str):
 
 
 def hablar_sync(texto: str):
-    """
-    Habla de forma SINCRONA en el hilo actual (para apagado).
-    No usa la cola ni el worker — crea su propio engine y espera.
-    """
+    """Habla de forma SINCRONA (para apagado). No usa cola ni worker."""
     if not TTS_OK:
         return
     _hablar_una_vez(texto)
 
-
-# ══════════════════════════════════════════════════════════════════
-#  UTILIDADES DE ARCHIVO
-# ══════════════════════════════════════════════════════════════════
+# ── Utilidades de archivo ─────────────────────────────────────────
 
 def limpiar_json(texto: str) -> str:
     """Extrae el JSON limpio aunque venga con markdown o texto libre."""
@@ -635,6 +665,39 @@ def limpiar_json(texto: str) -> str:
     texto = re.sub(r"```", "", texto)
     match = re.search(r"\{.*\}", texto, re.DOTALL)
     return match.group(0).strip() if match else texto.strip()
+
+
+def limpiar_texto_tts(texto: str) -> str:
+    """
+    Limpia texto antes de enviarlo a Piper TTS.
+    Elimina caracteres fonéticos IPA, corchetes, emojis y símbolos
+    que causan que Piper genere audio vacío o crashee.
+    """
+    # 1. Eliminar transcripciones fonéticas IPA: /ˈalbɐt ˈaɪnʃtaɪn/
+    texto = re.sub(r"/[^/]+/", "", texto)
+    # 2. Eliminar contenido entre corchetes: [editar], [1], [cita requerida]
+    texto = re.sub(r"\[[^\]]*\]", "", texto)
+    # 3. Eliminar paréntesis vacíos o con solo puntuación/espacios: (), ( ; ),  (  )
+    texto = re.sub(r"\(\s*[;,.:]*\s*\)", "", texto)
+    # 4. Eliminar emojis y símbolos Unicode misceláneos
+    texto = re.sub(
+        r"[\U0001F600-\U0001F64F"   # emoticons
+        r"\U0001F300-\U0001F5FF"    # misc symbols & pictographs
+        r"\U0001F680-\U0001F6FF"    # transport & map
+        r"\U0001F900-\U0001F9FF"    # supplemental symbols
+        r"\U0001FA00-\U0001FA6F"    # chess symbols
+        r"\U0001FA70-\U0001FAFF"    # symbols extended-A
+        r"\U00002702-\U000027B0"    # dingbats
+        r"\U0000FE00-\U0000FE0F"    # variation selectors
+        r"\U0000200D"               # zero width joiner
+        r"]+", "", texto
+    )
+    # 5. Reemplazar comillas tipográficas por comillas normales
+    texto = texto.replace("\u201c", '"').replace("\u201d", '"')
+    texto = texto.replace("\u2018", "'").replace("\u2019", "'")
+    # 6. Normalizar espacios múltiples y limpiar
+    texto = re.sub(r"\s{2,}", " ", texto).strip()
+    return texto
 
 
 def nombre_unico(nombre_base: str) -> Path:
@@ -652,8 +715,8 @@ def abrir_archivo(ruta: Path):
     try:
         os.startfile(str(ruta))
     except AttributeError:
-        cmd = f'xdg-open "{ruta}"' if sys.platform.startswith("linux") else f'open "{ruta}"'
-        os.system(cmd)
+        opener = "xdg-open" if sys.platform.startswith("linux") else "open"
+        subprocess.Popen([opener, str(ruta)])
 
 
 def _borrar_temp():
@@ -663,13 +726,9 @@ def _borrar_temp():
     except Exception:
         pass
 
+# ── Notificaciones ─────────────────────────────────────────────
 
-# ══════════════════════════════════════════════════════════════════
-#  NOTIFICACIONES DE WINDOWS
-# ══════════════════════════════════════════════════════════════════
-
-# Referencia global al icono de bandeja (se asigna en iniciar_tray)
-_tray_icon: "pystray.Icon | None" = None
+_tray_icon = None
 
 
 def notificar(titulo: str, mensaje: str, duracion: int = 5):
@@ -690,24 +749,17 @@ def notificar(titulo: str, mensaje: str, duracion: int = 5):
         except Exception:
             pass
 
-    # Fallback: pystray notify (solo si el icono ya esta activo)
+    # Fallback: pystray
     if TRAY_OK and _tray_icon is not None:
         try:
             _tray_icon.notify(mensaje, titulo)
         except Exception:
             pass
 
+# ── Icono de bandeja ────────────────────────────────────────────
 
-# ══════════════════════════════════════════════════════════════════
-#  ICONO DE BANDEJA DEL SISTEMA (pystray)
-# ══════════════════════════════════════════════════════════════════
-
-def _crear_imagen_icono(size: int = 64) -> "Image.Image":
-    """
-    Genera el icono de JARVIS con PIL.
-    Primero intenta cargar robot.png del directorio del script;
-    si no existe, genera un icono vectorial con la letra J.
-    """
+def _crear_imagen_icono(size=64):
+    """Genera el icono de JARVIS: carga robot.png o genera uno con la letra J."""
     ruta_png = DIR_BASE / "robot.png"
     if ruta_png.exists():
         try:
@@ -720,38 +772,33 @@ def _crear_imagen_icono(size: int = 64) -> "Image.Image":
     img  = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # Fondo: circulo azul oscuro con borde cian
     margin = 2
     draw.ellipse(
         [margin, margin, size - margin, size - margin],
-        fill    = (15, 25, 60, 255),   # Azul muy oscuro
-        outline = (0, 210, 255, 255),  # Cian brillante
-        width   = 3,
+        fill=(15, 25, 60, 255),
+        outline=(0, 210, 255, 255),
+        width=3,
     )
 
-    # Letra "J" centrada
-    letra = "J"
-    # Intentar fuente del sistema; fallback al default de PIL
     fuente = None
     try:
         fuente = ImageFont.truetype("arial.ttf", size=int(size * 0.52))
     except Exception:
         fuente = ImageFont.load_default()
 
-    bbox = draw.textbbox((0, 0), letra, font=fuente)
+    bbox = draw.textbbox((0, 0), "J", font=fuente)
     tw   = bbox[2] - bbox[0]
     th   = bbox[3] - bbox[1]
     tx   = (size - tw) // 2 - bbox[0]
     ty   = (size - th) // 2 - bbox[1]
-    draw.text((tx, ty), letra, fill=(0, 210, 255, 255), font=fuente)
+    draw.text((tx, ty), "J", fill=(0, 210, 255, 255), font=fuente)
 
     return img
 
 
 def _menu_estado(icon, item):
-    """Opcion 'Estado' del menu: muestra una notificacion de Windows."""
     msg = (
-        f"Historial: {len(historial)} msgs | "
+        f"Historial: {jarvis_memory.contar_mensajes()} msgs | "
         f"Voz: {'ON' if SR_OK else 'OFF'} | "
         f"Audio: {'ON' if AUDIO_OK else 'OFF'} | "
         f"Vision: {MODELO_VISION}"
@@ -761,7 +808,6 @@ def _menu_estado(icon, item):
 
 
 def _menu_apagar(icon, item):
-    """Opcion 'Apagar JARVIS' del menu: detiene todos los hilos y sale."""
     log("Apagando JARVIS desde el menu de bandeja...", "TRAY")
     notificar("JARVIS", "Sistema apagandose. Hasta pronto.", duracion=3)
     running.clear()
@@ -771,10 +817,7 @@ def _menu_apagar(icon, item):
 
 
 def iniciar_tray():
-    """
-    Crea el icono de bandeja y lo lanza en un hilo daemon.
-    No bloquea el bucle de voz ni el detector de palmadas.
-    """
+    """Crea el icono de bandeja y lo lanza en un hilo daemon."""
     global _tray_icon
 
     if not TRAY_OK:
@@ -1016,6 +1059,11 @@ def accion_borrar_archivo(datos: dict, recognizer=None, mic=None):
                 ruta = candidato
                 break
 
+    if not ruta.exists():
+        log(f"Archivo no encontrado: {ruta}", "ERROR")
+        hablar(_T("archivo_no_encontrado", nombre=ruta.name))
+        return
+
     log(f"Voy a enviar a la papelera: {ruta}")
 
     # --- Confirmacion: primero por voz, fallback a teclado ---
@@ -1072,11 +1120,8 @@ def accion_ver_pantalla(datos: dict, orden_original: str):
         analisis = respuesta["message"]["content"].strip()
         log(f"[{MODELO_VISION.upper()}] {analisis}")
 
-        with historial_lock:
-            historial.append({
-                "role"   : "assistant",
-                "content": f"[Analice la pantalla y observe]: {analisis}"
-            })
+        jarvis_memory.guardar_mensaje("assistant", f"[Analice la pantalla y observe]: {analisis}")
+
     except ollama.ResponseError as e:
         log(f"LLaVA respondio con error: {e}", "ERROR")
         log(f"Asegurate de tener el modelo: ollama pull {MODELO_VISION}", "HINT")
@@ -1160,19 +1205,30 @@ def protocolo_welcome_home():
             except Exception:
                 pass
 
-        # Obtener dia y mes en español
+        # Obtener dia y mes localizado
         ahora = datetime.now()
-        dias = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
-        meses = ["", "enero", "febrero", "marzo", "abril", "mayo", "junio",
-                 "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
-        dia_nombre = dias[ahora.weekday()]
-        mes_nombre = f"{ahora.day} de {meses[ahora.month]}"
-
-        saludo = (
-            f"Bienvenido a casa, señor. Hoy es {dia_nombre} {mes_nombre}. "
-            "Los sistemas de seguridad están activos y el núcleo Llama 3.1 "
-            "funciona al 100%. ¿En qué trabajaremos hoy?"
-        )
+        if IDIOMA_UI == "en":
+            dias = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+            meses = ["", "January", "February", "March", "April", "May", "June",
+                     "July", "August", "September", "October", "November", "December"]
+            dia_nombre = dias[ahora.weekday()]
+            mes_nombre = f"{meses[ahora.month]} {ahora.day}"
+            saludo = (
+                f"Welcome home, sir. Today is {dia_nombre}, {mes_nombre}. "
+                f"All systems are active. {MODELO_GENERAL} engine running at 100%. "
+                "What shall we work on today?"
+            )
+        else:
+            dias = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+            meses = ["", "enero", "febrero", "marzo", "abril", "mayo", "junio",
+                     "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
+            dia_nombre = dias[ahora.weekday()]
+            mes_nombre = f"{ahora.day} de {meses[ahora.month]}"
+            saludo = (
+                f"Bienvenido a casa, señor. Hoy es {dia_nombre} {mes_nombre}. "
+                f"Todos los sistemas están activos. Motor {MODELO_GENERAL} operativo al 100%. "
+                "¿En qué trabajaremos hoy?"
+            )
         log(saludo)
         hablar(saludo)
 
@@ -1193,7 +1249,7 @@ def accion_abrir_web(datos: dict):
     try:
         webbrowser.open(url)
         log(f"Abriendo en navegador: {url}")
-        hablar("Listo, abriendo en el navegador.")
+        hablar(_T("abriendo_navegador"))
     except Exception as e:
         log(f"No pude abrir la URL: {e}", "ERROR")
 
@@ -1216,26 +1272,29 @@ def accion_abrir_programa(datos: dict):
         time.sleep(0.5)
         pyautogui.press('enter')
         log(f"Abriendo programa: {nombre}")
-        hablar(f"Abriendo {nombre}, señor.")
+        hablar(_T("abriendo_programa", nombre=nombre))
     except Exception as e:
         log(f"No pude abrir el programa '{nombre}': {e}", "ERROR")
 
 
 def accion_cerrar_programa(datos: dict):
     """Fuerza el cierre de un programa en Windows."""
-    nombre = datos.get("nombre", "").strip().lower()
+    nombre = datos.get("nombre", "").strip().lower().replace(".exe", "")
     if not nombre:
         log("No especificaste qué programa cerrar.", "ERROR")
         return
-    
-    # Limpiar por si la IA devuelve "discord.exe" en vez de "discord"
-    nombre = nombre.replace(".exe", "")
-    
-    log(f"Cerrando proceso: {nombre}.exe")
-    hablar(f"Cerrando {nombre}, señor.")
-    
-    # Comando interno de Windows para matar procesos a la fuerza
-    os.system(f"taskkill /f /im {nombre}.exe /t")
+
+    nombre_safe = re.sub(r'[^a-zA-Z0-9_\-]', '', nombre)
+    if not nombre_safe:
+        log(f"Nombre de programa inválido: '{nombre}'", "ERROR")
+        return
+
+    log(f"Cerrando proceso: {nombre_safe}.exe")
+    hablar(_T("cerrando_programa", nombre=nombre_safe))
+    subprocess.run(
+        ["taskkill", "/f", "/im", f"{nombre_safe}.exe", "/t"],
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
 
 
 def accion_escribir_texto(datos: dict):
@@ -1252,7 +1311,7 @@ def accion_escribir_texto(datos: dict):
     try:
         pyautogui.write(texto, interval=0.01)
         log(f"Texto escrito: '{texto[:50]}{'...' if len(texto) > 50 else ''}'")
-        hablar("Listo, texto escrito.")
+        hablar(_T("texto_escrito"))
     except Exception as e:
         log(f"No pude escribir el texto: {e}", "ERROR")
 
@@ -1302,10 +1361,10 @@ def accion_mensaje_discord(datos: dict):
     mensaje = datos.get("mensaje", "").strip()
     if not destinatario or not mensaje:
         log("Faltan destinatario o mensaje para Discord.", "ERROR")
-        hablar("Necesito saber a quién y qué mensaje enviar por Discord.")
+        hablar(_T("discord_faltan_datos"))
         return
     log(f"Enviando mensaje Discord a {destinatario}: {mensaje}", "DISCORD")
-    hablar(f"Enviando mensaje a {destinatario} por Discord.")
+    hablar(_T("discord_enviando", destinatario=destinatario))
     resultado = automations.enviar_mensaje_discord(destinatario, mensaje)
     log(resultado)
     emitir_ui("jarvis", resultado)
@@ -1321,24 +1380,14 @@ def responder_con_datos(datos_obtenidos: str):
     en el historial como mensaje system, vuelve a consultar al LLM para
     que genere una respuesta natural, y la envía al TTS.
     """
-    with historial_lock:
-        historial.append({
-            "role": "system",
-            "content": (
-                f"INFORMACIÓN OBTENIDA DE INTERNET: {datos_obtenidos}. "
-                "Resume esto de forma natural y conversacional para el usuario."
-            )
-        })
-        mensajes = [{"role": "system", "content": obtener_system_prompt()}] + list(historial)
+    jarvis_memory.guardar_mensaje("system", f"INFORMACIÓN OBTENIDA DE INTERNET: {datos_obtenidos}. Resume esto de forma natural y conversacional para el usuario.")
+    mensajes = [{"role": "system", "content": obtener_system_prompt()}] + jarvis_memory.cargar_ultimos_mensajes(10)
 
     try:
         respuesta = ollama.chat(model=MODELO_GENERAL, messages=mensajes)
         texto_raw = respuesta["message"]["content"]
 
-        with historial_lock:
-            historial.append({"role": "assistant", "content": texto_raw})
-
-        guardar_memoria()
+        jarvis_memory.guardar_mensaje("assistant", texto_raw)
 
         texto_limpio = limpiar_json(texto_raw)
         try:
@@ -1347,9 +1396,15 @@ def responder_con_datos(datos_obtenidos: str):
         except json.JSONDecodeError:
             contenido = texto_raw.strip()
 
-        log(contenido)
-        emitir_ui("jarvis", contenido)
-        hablar(contenido)
+        # Limpiar y validar antes de hablar
+        contenido_limpio = limpiar_texto_tts(contenido)
+        if not contenido_limpio:
+            log("Respuesta del agente vacía tras limpieza. Nada que decir.", "AGENTE")
+            return
+
+        log(contenido_limpio)
+        emitir_ui("jarvis", contenido_limpio)
+        hablar(contenido_limpio)
     except Exception as e:
         # Fallback: leer los datos crudos si el LLM falla
         log(f"Error al procesar con LLM, leyendo datos directamente: {e}", "AGENTE")
@@ -1362,7 +1417,7 @@ def accion_obtener_clima(datos: dict):
     ciudad = datos.get("ciudad", "").strip()
     if not ciudad:
         log("No se especificó una ciudad para consultar el clima.", "ERROR")
-        hablar("No escuché la ciudad. ¿De qué ciudad quieres saber el clima?")
+        hablar(_T("clima_sin_ciudad"))
         return
 
     log(f"Consultando clima de '{ciudad}'...", "AGENTE")
@@ -1395,7 +1450,7 @@ def accion_obtener_clima(datos: dict):
     except requests.RequestException as e:
         msg = f"No pude obtener el clima de {ciudad}: {e}"
         log(msg, "ERROR")
-        hablar(f"Lo siento, no pude consultar el clima de {ciudad} en este momento.")
+        hablar(_T("clima_error", ciudad=ciudad))
 
 
 def accion_obtener_noticias(datos: dict):
@@ -1430,10 +1485,10 @@ def accion_obtener_noticias(datos: dict):
     except requests.RequestException as e:
         msg = f"No pude obtener las noticias: {e}"
         log(msg, "ERROR")
-        hablar("Lo siento, no pude acceder a las noticias en este momento.")
+        hablar(_T("noticias_error"))
     except ET.ParseError as e:
         log(f"Error al parsear RSS de noticias: {e}", "ERROR")
-        hablar("Hubo un problema leyendo las noticias. Intenta de nuevo.")
+        hablar(_T("noticias_parse_error"))
 
 
 def accion_buscar_info(datos: dict):
@@ -1441,12 +1496,12 @@ def accion_buscar_info(datos: dict):
     consulta = datos.get("consulta", "").strip()
     if not consulta:
         log("No se especificó un término para buscar.", "ERROR")
-        hablar("No escuché qué quieres que busque. ¿Puedes repetirlo?")
+        hablar(_T("buscar_sin_termino"))
         return
 
     if not WIKIPEDIA_OK:
         log("wikipedia no instalado. Ejecuta: pip install wikipedia", "ERROR")
-        hablar("No tengo acceso a la enciclopedia en este momento.")
+        hablar(_T("buscar_sin_acceso"))
         return
 
     log(f"Buscando en Wikipedia: '{consulta}'...", "AGENTE")
@@ -1467,7 +1522,7 @@ def accion_buscar_info(datos: dict):
         hablar(msg)
     except Exception as e:
         log(f"Error al buscar en Wikipedia: {e}", "ERROR")
-        hablar(f"No pude buscar información sobre {consulta} en este momento.")
+        hablar(_T("buscar_error", consulta=consulta))
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1475,24 +1530,56 @@ def accion_buscar_info(datos: dict):
 # ══════════════════════════════════════════════════════════════════
 
 def accion_guardar_recuerdo(datos: dict):
-    """Guarda un hecho sobre el usuario en la memoria profunda."""
+    """Guarda un hecho sobre el usuario en la memoria profunda (SQLite)."""
     dato = datos.get("dato", "").strip()
     if not dato:
         log("No se especificó qué recordar.", "ERROR")
         return
 
-    recuerdos = cargar_memoria_profunda()
-
-    # Evitar duplicados exactos
-    if dato not in recuerdos:
-        recuerdos.append(dato)
-        guardar_memoria_profunda(recuerdos)
+    es_nuevo = jarvis_memory.guardar_hecho(dato)
+    if es_nuevo:
         log(f"Recuerdo guardado: '{dato}'", "MEMORIA")
         emitir_ui("jarvis", f"Recuerdo guardado: {dato}")
-        hablar("Recuerdo guardado, señor.")
+        hablar(_T("recuerdo_guardado"))
     else:
         log(f"Recuerdo ya existente: '{dato}'", "MEMORIA")
-        hablar("Eso ya lo tenía apuntado, señor.")
+        hablar(_T("recuerdo_duplicado"))
+
+
+def accion_consultar_memoria(datos: dict):
+    """Busca en el historial/hechos cuando el usuario pregunta por algo que ya le dijo."""
+    query = datos.get("query", "").strip()
+    if not query:
+        log("No se especificó qué buscar en la memoria.", "ERROR")
+        hablar(_T("buscar_recuerdos_vacio"))
+        return
+
+    log(f"Buscando en memoria: '{query}'", "MEMORIA")
+
+    # 1. Buscar en hechos del usuario (memoria profunda)
+    hechos = jarvis_memory.cargar_hechos()
+    hechos_relevantes = [h for h in hechos if any(p in h.lower() for p in query.lower().split())]
+
+    # 2. Buscar en historial de conversaciones
+    resultados_hist = jarvis_memory.buscar_en_historial(query, dias=90, limite=5)
+
+    # 3. Construir respuesta
+    partes = []
+    if hechos_relevantes:
+        partes.append("Hechos recordados: " + "; ".join(hechos_relevantes))
+    if resultados_hist:
+        resumen = " | ".join(
+            f"[{r.get('timestamp', '?')}] {r['role']}: {r['content'][:100]}"
+            for r in resultados_hist
+        )
+        partes.append(f"Conversaciones pasadas: {resumen}")
+
+    if partes:
+        datos_encontrados = " — ".join(partes)
+        responder_con_datos(f"RESULTADOS DE MEMORIA: {datos_encontrados}")
+    else:
+        hablar(_T("sin_recuerdos", query=query))
+        emitir_ui("jarvis", f"Sin recuerdos sobre: {query}")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1513,7 +1600,7 @@ def accion_procesar_archivo(datos: dict):
     ruta = Path(ruta_str)
     if not ruta.exists():
         log(f"Archivo no encontrado: {ruta}", "ERROR")
-        hablar(f"No encuentro el archivo {ruta.name}, señor.")
+        hablar(_T("archivo_no_encontrado", nombre=ruta.name))
         return
 
     ext = ruta.suffix.lower()
@@ -1523,7 +1610,7 @@ def accion_procesar_archivo(datos: dict):
     if ext in (".png", ".jpg", ".jpeg", ".bmp", ".gif"):
         emitir_ui("estado", "vision")
         log(f"Procesando imagen con LLaVA: {nombre}", "VISION")
-        hablar(f"Analizando la imagen {nombre}, señor.")
+        hablar(_T("analizando_imagen", nombre=nombre))
 
         try:
             img_b64 = base64.b64encode(ruta.read_bytes()).decode("utf-8")
@@ -1539,19 +1626,14 @@ def accion_procesar_archivo(datos: dict):
             analisis = respuesta["message"]["content"].strip()
             log(f"[LLAVA] {analisis}", "VISION")
 
-            with historial_lock:
-                historial.append({
-                    "role": "assistant",
-                    "content": f"[Analicé la imagen '{nombre}' y observé]: {analisis}"
-                })
-            guardar_memoria()
+            jarvis_memory.guardar_mensaje("assistant", f"[Analicé la imagen '{nombre}' y observé]: {analisis}")
 
             emitir_ui("jarvis", analisis)
             hablar(analisis)
 
         except Exception as e:
             log(f"Error al procesar imagen con LLaVA: {e}", "ERROR")
-            hablar("No pude analizar la imagen, señor.")
+            hablar(_T("imagen_error"))
         finally:
             emitir_ui("estado", "escuchando")
 
@@ -1566,27 +1648,19 @@ def accion_procesar_archivo(datos: dict):
             if len(contenido) > 4000:
                 contenido = contenido[:4000] + "\n... [truncado]"
 
-            with historial_lock:
-                historial.append({
-                    "role": "system",
-                    "content": (
-                        f"El usuario ha arrastrado el archivo '{nombre}' ({ext}). "
-                        f"Contenido:\n{contenido}"
-                    )
-                })
-            guardar_memoria()
+            jarvis_memory.guardar_mensaje("system", f"El usuario ha arrastrado el archivo '{nombre}' ({ext}). Contenido:\n{contenido}")
 
             log(f"Archivo leído: {nombre} ({len(contenido)} chars)", "DROP")
             emitir_ui("jarvis", f"Archivo leído: {nombre}")
-            hablar(f"Archivo leído, señor. ¿Qué desea que haga con él?")
+            hablar(_T("archivo_leido"))
 
         except Exception as e:
             log(f"Error al leer archivo {nombre}: {e}", "ERROR")
-            hablar(f"No pude leer el archivo {nombre}, señor.")
+            hablar(_T("archivo_leer_error", nombre=nombre))
 
     else:
         log(f"Tipo de archivo no soportado: {ext}", "DROP")
-        hablar(f"No sé cómo procesar archivos {ext}, señor.")
+        hablar(_T("archivo_no_soportado", ext=ext))
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1605,17 +1679,20 @@ def consultar_mistral(orden: str) -> dict:
     else:
         log(f"Modelo general -> {MODELO_GENERAL}", "ROUTER")
 
-    with historial_lock:
-        historial.append({"role": "user", "content": orden})
-        mensajes = [{"role": "system", "content": obtener_system_prompt()}] + list(historial)
+    # --- NUEVO USO DE SQLITE (Fase 1) ---
+    # 1. Guardamos lo que dijo el usuario
+    jarvis_memory.guardar_mensaje("user", orden)
+    
+    # 2. Preparamos los mensajes: System Prompt + Últimos 10 turnos de SQLite
+    mensajes = [{"role": "system", "content": obtener_system_prompt()}] + jarvis_memory.cargar_ultimos_mensajes(10)
+    # ------------------------------------
 
+    # Llamada a la IA
     respuesta  = ollama.chat(model=modelo, messages=mensajes)
     texto_raw  = respuesta["message"]["content"]
 
-    with historial_lock:
-        historial.append({"role": "assistant", "content": texto_raw})
-
-    guardar_memoria()
+    # 3. Guardamos la respuesta cruda de la IA
+    jarvis_memory.guardar_mensaje("assistant", texto_raw)
 
     texto_limpio = limpiar_json(texto_raw)
     try:
@@ -1686,6 +1763,13 @@ def enrutar(datos: dict, orden_original: str, recognizer=None, mic=None):
     elif accion == "mensaje_discord":
         accion_mensaje_discord(datos)
 
+    elif accion == "consultar_memoria":
+        accion_consultar_memoria(datos)
+
+    # ── Plugins (acciones externas registradas por plugin_manager) ──
+    elif plugin_manager.puede_manejar(accion):
+        plugin_manager.ejecutar_accion(accion, datos, hablar, emitir_ui)
+
     else:
         log(f"Accion desconocida '{accion}'. Tratando como conversacion.")
         accion_conversar(datos)
@@ -1755,14 +1839,15 @@ def bucle_voz(recognizer: "sr.Recognizer", mic: "sr.Microphone"):
 
         # ── 4. Comandos internos ─────────────────────────────────────────
         if "limpiar historial" in texto:
-            with historial_lock:
-                historial.clear()
-            guardar_memoria()
-            log("Historial borrado. Empezamos de cero.")
+            jarvis_memory.limpiar_historial()
+            log("Historial de SQLite borrado. Empezamos de cero.")
             continue
 
         if "estado del sistema" in texto or "estado jarvis" in texto:
-            log(f"Mensajes en historial: {len(historial)}")
+            estado_mem = jarvis_memory.estado()
+            log(f"Mensajes en historial: {estado_mem['mensajes_totales']} | "
+                f"Hechos guardados: {estado_mem['hechos_usuario']} | "
+                f"Context window: {estado_mem['context_window']}")
             log(f"Voz: {'OK' if SR_OK else 'NO'} | "
                 f"Audio: {'OK' if AUDIO_OK else 'NO'} | "
                 f"GUI: {'OK' if PYAUTOGUI_OK else 'NO'} | "
@@ -1845,14 +1930,12 @@ def bucle_teclado():
             _apagado_limpio()
 
         if orden.lower() == "limpiar historial":
-            with historial_lock:
-                historial.clear()
-            guardar_memoria()
-            log("Historial borrado.")
+            jarvis_memory.limpiar_historial()
+            log("Historial de SQLite borrado. Empezamos de cero.")
             continue
 
         if orden.lower() == "estado":
-            log(f"Historial: {len(historial)} mensajes | "
+            log(f"Base de Datos SQLite: ACTIVA | "
                 f"Audio: {'OK' if AUDIO_OK else 'NO'} | "
                 f"GUI: {'OK' if PYAUTOGUI_OK else 'NO'} | "
                 f"Trash: {'OK' if SEND2TRASH_OK else 'NO'}")
@@ -1885,16 +1968,16 @@ def _apagado_limpio():
             pass
     time.sleep(0.5)
     log("JARVIS apagado. Hasta pronto.", "SHUTDOWN")
-    os._exit(0)  # Forzar salida limpia del proceso completo
+    sys.exit(0)
 
 
 def iniciar_backend():
     """
-    Inicializa todos los subsistemas del backend (memoria, tray, palmadas, TTS)
+    Inicializa todos los subsistemas del backend (memoria SQLite, plugins, tray, palmadas, TTS)
     SIN entrar en el bucle de voz/teclado. Para uso externo desde jarvis_ui.py.
     """
     print("\n" + "=" * 68)
-    print("  J.A.R.V.I.S  v7.0  |  Living Profile & Automation Edition")
+    print("  J.A.R.V.I.S  v1.2.0  |  Living Profile & Automation Edition")
     print(f"  General: {MODELO_GENERAL}  |  Coder: {MODELO_CODER}  |  Vision: {MODELO_VISION}  |  TTS: {'ON' if TTS_OK else 'OFF'}")
     print(f"  Archivos en: {DIR_FILES}")
     print(f"  Wake word: '{WAKE_WORD.upper()}' | Cierre: 'apagate' / menu de bandeja / Ctrl+C")
@@ -1906,7 +1989,18 @@ def iniciar_backend():
             print(f"  {aviso}")
         print()
 
-    cargar_memoria()
+    jarvis_memory.init_db(DIR_BASE / "jarvis_memory.db")
+    plugin_manager.cargar_plugins(DIR_BASE / "plugins")
+
+    # Pre-cargar perfil del disco → RAM (1 sola lectura para toda la sesión)
+    cargar_system_profile()
+
+    # Configurar idioma de Wikipedia según IDIOMA_UI (autodetectado del modelo Piper)
+    if WIKIPEDIA_OK:
+        idioma_wiki = IDIOMA_UI if IDIOMA_UI in ("es", "en", "fr", "de", "pt") else "es"
+        wikipedia.set_lang(idioma_wiki)
+        log(f"Wikipedia configurada en idioma '{idioma_wiki}'.", "WIKI")
+
     iniciar_tray()
     notificar(
         "JARVIS activado",
@@ -1915,7 +2009,7 @@ def iniciar_backend():
     )
     iniciar_detector_palmadas()
     _iniciar_tts_worker()
-    log("Backend inicializado. Listo para recibir órdenes.", "CORE")
+    log("Backend inicializado con SQLite y Plugins. Listo.", "CORE")
 
 
 def iniciar_bucle_entrada():
@@ -1951,66 +2045,9 @@ def iniciar_bucle_entrada():
 
 
 def main():
-    print("\n" + "=" * 68)
-    print("  J.A.R.V.I.S  v7.0  |  Living Profile & Automation Edition")
-    print(f"  General: {MODELO_GENERAL}  |  Coder: {MODELO_CODER}  |  Vision: {MODELO_VISION}  |  TTS: {'ON' if TTS_OK else 'OFF'}")
-    print(f"  Archivos en: {DIR_FILES}")
-    print(f"  Wake word: '{WAKE_WORD.upper()}' | Cierre: 'apagate' / menu de bandeja / Ctrl+C")
-    print("=" * 68)
-
-    # Mostrar avisos de dependencias faltantes
-    if _avisos_inicio:
-        print()
-        for aviso in _avisos_inicio:
-            print(f"  {aviso}")
-        print()
-
-    # ── 0. Cargar memoria persistente ─────────────────────────────────────
-    cargar_memoria()
-
-    # ── 1. Icono en bandeja del sistema (hilo daemon) ────────────────────
-    iniciar_tray()
-
-    # ── 2. Notificacion de arranque ──────────────────────────────────────
-    notificar(
-        "JARVIS activado",
-        f"Escuchando... Di '{WAKE_WORD.upper()}' para activar.",
-        duracion=4,
-    )
-
-    # ── 3. Detector de palmadas en segundo plano ─────────────────────────
-    iniciar_detector_palmadas()
-
-    # ── 3.5. Iniciar worker TTS ──────────────────────────────────────────
-    _iniciar_tts_worker()
-
-    # ── 4. Elegir modo de entrada ────────────────────────────────────────
-    if SR_OK:
-        recognizer = sr.Recognizer()
-        recognizer.energy_threshold = 300
-        recognizer.dynamic_energy_threshold = True
-        recognizer.pause_threshold = 0.8
-
-        mic = sr.Microphone()
-
-        # Calibrar ruido ambiental al inicio
-        log("Calibrando ruido ambiental (1 segundo)...", "VOZ")
-        try:
-            with mic as source:
-                recognizer.adjust_for_ambient_noise(source, duration=1)
-            log(f"Calibracion OK. Umbral de energia: {int(recognizer.energy_threshold)}", "VOZ")
-        except Exception as e:
-            log(f"No se pudo calibrar el microfono: {e}", "AVISO")
-
-        try:
-            bucle_voz(recognizer, mic)
-        except (KeyboardInterrupt, SystemExit):
-            _apagado_limpio()
-    else:
-        try:
-            bucle_teclado()
-        except (KeyboardInterrupt, SystemExit):
-            _apagado_limpio()
+    """Punto de entrada standalone (sin UI holográfica)."""
+    iniciar_backend()
+    iniciar_bucle_entrada()
 
 
 if __name__ == "__main__":

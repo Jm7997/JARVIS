@@ -1,3 +1,16 @@
 PyQt6
 ollama
 requests
+pyautogui
+send2trash
+pillow
+SpeechRecognition
+sounddevice
+soundfile
+numpy
+pyaudio
+pystray
+plyer
+pyttsx3
+psutil
+wikipedia

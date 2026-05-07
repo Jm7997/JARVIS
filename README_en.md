@@ -13,6 +13,12 @@ A desktop virtual assistant inspired by Iron Man, created in Python. It features
 * **Clap Activation:** "Double-clap" detection system to wake up the *Welcome Home* protocol.
 * **Living Profile:** JARVIS knows who you are and what you like thanks to a local configuration file.
 * **Vision (Drag & Drop):** Drag images into the window and JARVIS will analyze them.
+* **SQLite Memory:** Goodbye JSON files. Chat history and long-term memories are now stored in an ultra-fast relational database (`jarvis_memory.db`).
+* **Plugin System:** Modular architecture. Add new capabilities (smart home, lights, etc.) by simply dropping `.py` files into the `/plugins` folder.
+* **Audio Visualizer:** A new holographic cyan equalizer that reacts smoothly while the assistant speaks.
+* **Dynamic Localization (i18n):** The UI and J.A.R.V.I.S.'s greetings automatically adapt to English or Spanish based on the Piper TTS voice model you are using.
+* **Model Self-Awareness:** The system natively knows exactly which "brain" it is using (Mistral, Qwen, LLaVA), eliminating identity hallucinations.
+
 
 ## 🛠️ Requirements and Installation
 
