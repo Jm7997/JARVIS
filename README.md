@@ -58,5 +58,3 @@ Para que la IA tenga su propia personalidad y sepa quién eres desde el primer m
 2. Haz una copia de ese archivo y renómbralo a **`system_profile.txt`**.
 3. Ábrelo y rellena tus datos (tu nombre, gustos, cómo quieres que te hable).
 4. Guarda el archivo. ¡JARVIS lo leerá al iniciarse!
-
-*(Nota: Tu archivo `system_profile.txt` está protegido por el archivo `.gitignore`. Tus datos personales nunca se subirán a GitHub).*
