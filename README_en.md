@@ -58,5 +58,3 @@ To give the AI its own personality and teach it who you are from the very first 
 2. Make a copy of that file and rename it to **`system_profile.txt`**.
 3. Open it and fill in your data (your name, interests, how you want it to talk to you).
 4. Save the file. JARVIS will read it upon startup!
-
-*(Note: Your `system_profile.txt` file is protected by the `.gitignore` file. Your personal data will never be uploaded to GitHub).*
