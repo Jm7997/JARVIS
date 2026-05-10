@@ -15,6 +15,7 @@ import threading
 import queue
 import time
 
+# pyrefly: ignore [missing-import]
 from PyQt6.QtCore import (
     Qt, QTimer, QPropertyAnimation, QEasingCurve, QRectF, QPointF,
     pyqtProperty, QSize
@@ -252,12 +253,15 @@ class EsferaReactiva(QWidget):
 class SubtituloLabel(QWidget):
     """
     Etiqueta de texto flotante con fade-out automático tras 5 segundos.
+    Usa altura flexible para que el texto largo no se corte.
     """
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(80)
-        self.setMinimumWidth(380)
+        self.setMinimumHeight(60)
+        self.setMinimumWidth(260)
+        self.setMaximumWidth(300)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.MinimumExpanding)
 
         self._label = QLabel(self)
         self._label.setAlignment(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop)
@@ -269,13 +273,15 @@ class SubtituloLabel(QWidget):
                 font-size: 13px;
                 font-weight: 600;
                 background: transparent;
-                padding: 4px 12px;
+                padding: 6px 16px;
+                text-align: center;
             }
         """)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self._label)
+        layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        layout.addWidget(self._label, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         # Efecto de opacidad para fade-out
         self._opacity = QGraphicsOpacityEffect(self)
@@ -301,7 +307,8 @@ class SubtituloLabel(QWidget):
                 font-size: 13px;
                 font-weight: 600;
                 background: transparent;
-                padding: 4px 12px;
+                padding: 6px 16px;
+                text-align: center;
             }}
         """)
 
@@ -327,12 +334,12 @@ class SubtituloLabel(QWidget):
     def mostrar_usuario(self, texto: str):
         """Muestra lo que dijo el usuario."""
         display = texto if len(texto) <= 120 else texto[:117] + "..."
-        self._mostrar(f"Tú: {display}", "rgba(180, 220, 255, 220)")
+        self._mostrar(f"Tú:\n{display}", "rgba(180, 220, 255, 220)")
 
     def mostrar_jarvis(self, texto: str):
         """Muestra lo que respondió JARVIS."""
         display = texto if len(texto) <= 150 else texto[:147] + "..."
-        self._mostrar(f"JARVIS: {display}", "rgba(0, 210, 255, 240)")
+        self._mostrar(f"JARVIS:\n{display}", "rgba(0, 210, 255, 240)")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -456,7 +463,7 @@ class VisualizadorAudio(QWidget):
     """Barras de ecualizador holográfico — activas solo al hablar."""
 
     NUM_BARRAS = 16
-    COLOR_BARRA = QColor(0, 230, 255)  # Cian brillante
+    COLOR_BARRA = QColor(240, 240, 255)  # Blanco cálido (sincronizado con COLOR_HABLANDO)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -520,7 +527,8 @@ class VisualizadorAudio(QWidget):
             x = x_offset + i * (bar_w + 3)
             y = h - bar_h
 
-            color = QColor(self.COLOR_BARRA)
+            # --- ARREGLO VISUAL: Color blanco cálido ---
+            color = QColor(240, 240, 255) 
             color.setAlpha(int(140 + 80 * amp))
 
             painter.setPen(Qt.PenStyle.NoPen)
@@ -593,13 +601,13 @@ class VentanaHolograma(QMainWindow):
         self._estado_label = EstadoLabel(self)
         layout.addWidget(self._estado_label, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        # Visualizador de audio (ecualizador holográfico)
-        self._audio_viz = VisualizadorAudio(self)
-        layout.addWidget(self._audio_viz, alignment=Qt.AlignmentFlag.AlignHCenter)
-
         # Subtítulos dinámicos
         self._subtitulos = SubtituloLabel(self)
         layout.addWidget(self._subtitulos, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        # Visualizador de audio (ecualizador holográfico) — al fondo
+        self._audio_viz = VisualizadorAudio(self)
+        layout.addWidget(self._audio_viz, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         # Spacer inferior
         layout.addStretch()

@@ -497,3 +497,25 @@ def estado() -> dict:
         "context_window":   CONTEXT_WINDOW,
         "db_path":          str(_DB_PATH) if _DB_PATH else "no inicializada",
     }
+
+
+# ══════════════════════════════════════════════════════════════════
+#  CIERRE LIMPIO
+# ══════════════════════════════════════════════════════════════════
+
+def cerrar_conexion() -> None:
+    """
+    Cierre limpio de la BD SQLite.
+    Fuerza un WAL checkpoint para fusionar el journal con el archivo
+    principal (.db) y eliminar los archivos .db-wal y .db-shm.
+    Llamar antes de sys.exit() para un apagado perfecto.
+    """
+    if _DB_PATH is None:
+        return
+    try:
+        conn = _connect()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.close()
+    except Exception:
+        pass  # Nunca romper el apagado por un fallo de BD
+

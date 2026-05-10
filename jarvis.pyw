@@ -519,6 +519,13 @@ def obtener_system_prompt() -> str:
         '- Para lanzar juegos usa abrir_juego (accion 16), NO abrir_programa.\n'
         '- Para mensajes de Discord usa mensaje_discord (accion 17).\n'
         '- Para recuperar recuerdos del pasado usa consultar_memoria (accion 18).\n'
+    
+
+        # --- ¡AQUÍ PONEMOS EL PERFIL! LA ÚLTIMA PALABRA LA TIENE TU ARCHIVO ---
+        + "=== TU PERSONALIDAD Y CONTEXTO (PRIORIDAD MÁXIMA) ===\n"
+        + perfil + "\n"
+    
+    
     )
 
 
@@ -660,11 +667,61 @@ def hablar_sync(texto: str):
 # ── Utilidades de archivo ─────────────────────────────────────────
 
 def limpiar_json(texto: str) -> str:
-    """Extrae el JSON limpio aunque venga con markdown o texto libre."""
+    """
+    Extrae el primer bloque JSON válido del texto del LLM.
+
+    Estrategia de 3 niveles:
+      1. Conteo de llaves: localiza la primera '{' y avanza contando
+         llaves anidadas hasta cerrar. Intenta json.loads sobre el bloque.
+      2. Regex no codiciosa: si el conteo falla, prueba con ``{.*?}``
+         (lazy) para capturar el bloque más corto.
+      3. Fallback: devuelve el texto limpio de markdown tal cual.
+    """
+    # Paso 0: limpiar bloques de código markdown
     texto = re.sub(r"```(?:json)?\s*", "", texto)
     texto = re.sub(r"```", "", texto)
-    match = re.search(r"\{.*\}", texto, re.DOTALL)
-    return match.group(0).strip() if match else texto.strip()
+
+    # Paso 1: conteo de llaves — busca el primer bloque balanceado {…}
+    inicio = texto.find("{")
+    if inicio != -1:
+        profundidad = 0
+        en_string = False
+        escape = False
+        for i in range(inicio, len(texto)):
+            c = texto[i]
+            if escape:
+                escape = False
+                continue
+            if c == "\\":
+                escape = True
+                continue
+            if c == '"' and not escape:
+                en_string = not en_string
+                continue
+            if en_string:
+                continue
+            if c == "{":
+                profundidad += 1
+            elif c == "}":
+                profundidad -= 1
+                if profundidad == 0:
+                    candidato = texto[inicio:i + 1]
+                    try:
+                        json.loads(candidato)
+                        return candidato
+                    except json.JSONDecodeError:
+                        break  # Bloque mal formado, pasar a Plan 2
+
+    # Paso 2: regex no codiciosa (captura el bloque JSON más corto)
+    for match in re.finditer(r"\{.*?\}", texto, re.DOTALL):
+        try:
+            json.loads(match.group(0))
+            return match.group(0)
+        except json.JSONDecodeError:
+            continue
+
+    # Paso 3: fallback — devolver texto limpio tal cual
+    return texto.strip()
 
 
 def limpiar_texto_tts(texto: str) -> str:
@@ -1093,42 +1150,48 @@ def accion_ver_pantalla(datos: dict, orden_original: str):
         log("pyautogui no instalado. Ejecuta: pip install pyautogui pillow", "ERROR")
         return
 
+    emitir_ui("estado", "vision")
     pregunta = datos.get("pregunta") or orden_original or "Que ves en mi pantalla?"
     log("Tomando captura de pantalla...")
 
     try:
-        screenshot = pyautogui.screenshot()
-        screenshot.save(str(TEMP_SCREENSHOT))
-    except Exception as e:
-        log(f"No pude capturar pantalla: {e}", "ERROR")
-        return
+        try:
+            screenshot = pyautogui.screenshot()
+            screenshot.save(str(TEMP_SCREENSHOT))
+        except Exception as e:
+            log(f"No pude capturar pantalla: {e}", "ERROR")
+            return
 
-    try:
-        img_b64 = base64.b64encode(TEMP_SCREENSHOT.read_bytes()).decode("utf-8")
-    except Exception as e:
-        log(f"No pude leer imagen temporal: {e}", "ERROR")
-        _borrar_temp()
-        return
+        try:
+            img_b64 = base64.b64encode(TEMP_SCREENSHOT.read_bytes()).decode("utf-8")
+        except Exception as e:
+            log(f"No pude leer imagen temporal: {e}", "ERROR")
+            _borrar_temp()
+            return
 
-    log(f"Enviando a {MODELO_VISION} para analisis (puede tardar)...")
-    try:
-        respuesta = ollama.chat(
-            model    = MODELO_VISION,
-            messages = [{"role": "user", "content": pregunta, "images": [img_b64]}],
-            options  = {"num_predict": 512},
-        )
-        analisis = respuesta["message"]["content"].strip()
-        log(f"[{MODELO_VISION.upper()}] {analisis}")
+        log(f"Enviando a {MODELO_VISION} para analisis (puede tardar)...")
+        try:
+            respuesta = ollama.chat(
+                model    = MODELO_VISION,
+                messages = [{"role": "user", "content": pregunta, "images": [img_b64]}],
+                options  = {"num_predict": 512},
+            )
+            analisis = respuesta["message"]["content"].strip()
+            log(f"[{MODELO_VISION.upper()}] {analisis}")
 
-        jarvis_memory.guardar_mensaje("assistant", f"[Analice la pantalla y observe]: {analisis}")
+            jarvis_memory.guardar_mensaje("assistant", f"[Analice la pantalla y observe]: {analisis}")
+            emitir_ui("jarvis", analisis)
+            hablar(analisis)
 
-    except ollama.ResponseError as e:
-        log(f"LLaVA respondio con error: {e}", "ERROR")
-        log(f"Asegurate de tener el modelo: ollama pull {MODELO_VISION}", "HINT")
-    except Exception as e:
-        log(f"Fallo al contactar con {MODELO_VISION}: {type(e).__name__}: {e}", "ERROR")
+        except ollama.ResponseError as e:
+            log(f"LLaVA respondio con error: {e}", "ERROR")
+            log(f"Asegurate de tener el modelo: ollama pull {MODELO_VISION}", "HINT")
+        except Exception as e:
+            log(f"Fallo al contactar con {MODELO_VISION}: {type(e).__name__}: {e}", "ERROR")
+        finally:
+            _borrar_temp()
     finally:
-        _borrar_temp()
+        emitir_ui("estado", "escuchando")
 
 
 def accion_presionar_tecla(datos: dict, orden_original: str):
@@ -1379,37 +1442,57 @@ def responder_con_datos(datos_obtenidos: str):
     Bucle de realimentación del agente: inyecta datos reales de internet
     en el historial como mensaje system, vuelve a consultar al LLM para
     que genere una respuesta natural, y la envía al TTS.
+
+    Plan A: LLM genera respuesta → limpiar → hablar.
+    Plan B: Si la respuesta del LLM queda vacía tras limpieza,
+            intentar limpiar y hablar los datos_obtenidos directamente.
+    Plan C: Si el LLM falla completamente (excepción), hablar los
+            datos_obtenidos en crudo.
+    Finally: Siempre resetear la UI a 'escuchando'.
     """
-    jarvis_memory.guardar_mensaje("system", f"INFORMACIÓN OBTENIDA DE INTERNET: {datos_obtenidos}. Resume esto de forma natural y conversacional para el usuario.")
-    mensajes = [{"role": "system", "content": obtener_system_prompt()}] + jarvis_memory.cargar_ultimos_mensajes(10)
-
+    emitir_ui("estado", "pensando")
     try:
-        respuesta = ollama.chat(model=MODELO_GENERAL, messages=mensajes)
-        texto_raw = respuesta["message"]["content"]
+        jarvis_memory.guardar_mensaje("system", f"INFORMACIÓN OBTENIDA DE INTERNET: {datos_obtenidos}. Resume esto de forma natural y conversacional para el usuario.")
+        mensajes = [{"role": "system", "content": obtener_system_prompt()}] + jarvis_memory.cargar_ultimos_mensajes(10)
 
-        jarvis_memory.guardar_mensaje("assistant", texto_raw)
-
-        texto_limpio = limpiar_json(texto_raw)
         try:
-            datos = json.loads(texto_limpio)
-            contenido = datos.get("contenido", texto_raw.strip())
-        except json.JSONDecodeError:
-            contenido = texto_raw.strip()
+            # ── Plan A: respuesta del LLM ──
+            respuesta = ollama.chat(model=MODELO_GENERAL, messages=mensajes)
+            texto_raw = respuesta["message"]["content"]
 
-        # Limpiar y validar antes de hablar
-        contenido_limpio = limpiar_texto_tts(contenido)
-        if not contenido_limpio:
-            log("Respuesta del agente vacía tras limpieza. Nada que decir.", "AGENTE")
-            return
+            jarvis_memory.guardar_mensaje("assistant", texto_raw)
 
-        log(contenido_limpio)
-        emitir_ui("jarvis", contenido_limpio)
-        hablar(contenido_limpio)
-    except Exception as e:
-        # Fallback: leer los datos crudos si el LLM falla
-        log(f"Error al procesar con LLM, leyendo datos directamente: {e}", "AGENTE")
-        log(datos_obtenidos)
-        hablar(datos_obtenidos)
+            texto_limpio = limpiar_json(texto_raw)
+            try:
+                datos = json.loads(texto_limpio)
+                contenido = datos.get("contenido", texto_raw.strip())
+            except json.JSONDecodeError:
+                contenido = texto_raw.strip()
+
+            contenido_limpio = limpiar_texto_tts(contenido)
+
+            # ── Plan B: si el LLM devolvió basura, usar datos_obtenidos ──
+            if not contenido_limpio:
+                log("Respuesta del LLM vacía tras limpieza. Usando datos originales (Plan B).", "AGENTE")
+                contenido_limpio = limpiar_texto_tts(datos_obtenidos)
+
+            if not contenido_limpio:
+                log("Datos originales también vacíos tras limpieza. Abortando.", "AGENTE")
+                return
+
+            log(contenido_limpio)
+            emitir_ui("jarvis", contenido_limpio)
+            hablar(contenido_limpio)
+
+        except Exception as e:
+            # ── Plan C: el LLM falló, leer datos crudos directamente ──
+            log(f"Error al procesar con LLM, leyendo datos directamente: {e}", "AGENTE")
+            contenido_crudo = limpiar_texto_tts(datos_obtenidos) or datos_obtenidos
+            log(contenido_crudo)
+            emitir_ui("jarvis", contenido_crudo)
+            hablar(contenido_crudo)
+    finally:
+        emitir_ui("estado", "escuchando")
 
 
 def accion_obtener_clima(datos: dict):
@@ -1606,61 +1689,63 @@ def accion_procesar_archivo(datos: dict):
     ext = ruta.suffix.lower()
     nombre = ruta.name
 
-    # ---- Imágenes: procesar con LLaVA ----
-    if ext in (".png", ".jpg", ".jpeg", ".bmp", ".gif"):
-        emitir_ui("estado", "vision")
-        log(f"Procesando imagen con LLaVA: {nombre}", "VISION")
-        hablar(_T("analizando_imagen", nombre=nombre))
+    try:
+        # ---- Imágenes: procesar con LLaVA ----
+        if ext in (".png", ".jpg", ".jpeg", ".bmp", ".gif"):
+            emitir_ui("estado", "vision")
+            log(f"Procesando imagen con LLaVA: {nombre}", "VISION")
+            hablar(_T("analizando_imagen", nombre=nombre))
 
-        try:
-            img_b64 = base64.b64encode(ruta.read_bytes()).decode("utf-8")
-            respuesta = ollama.chat(
-                model    = MODELO_VISION,
-                messages = [{
-                    "role": "user",
-                    "content": f"Describe detalladamente esta imagen llamada '{nombre}'.",
-                    "images": [img_b64]
-                }],
-                options  = {"num_predict": 512},
-            )
-            analisis = respuesta["message"]["content"].strip()
-            log(f"[LLAVA] {analisis}", "VISION")
+            try:
+                img_b64 = base64.b64encode(ruta.read_bytes()).decode("utf-8")
+                respuesta = ollama.chat(
+                    model    = MODELO_VISION,
+                    messages = [{
+                        "role": "user",
+                        "content": f"Describe detalladamente esta imagen llamada '{nombre}'.",
+                        "images": [img_b64]
+                    }],
+                    options  = {"num_predict": 512},
+                )
+                analisis = respuesta["message"]["content"].strip()
+                log(f"[LLAVA] {analisis}", "VISION")
 
-            jarvis_memory.guardar_mensaje("assistant", f"[Analicé la imagen '{nombre}' y observé]: {analisis}")
+                jarvis_memory.guardar_mensaje("assistant", f"[Analicé la imagen '{nombre}' y observé]: {analisis}")
 
-            emitir_ui("jarvis", analisis)
-            hablar(analisis)
+                emitir_ui("jarvis", analisis)
+                hablar(analisis)
 
-        except Exception as e:
-            log(f"Error al procesar imagen con LLaVA: {e}", "ERROR")
-            hablar(_T("imagen_error"))
-        finally:
-            emitir_ui("estado", "escuchando")
+            except Exception as e:
+                log(f"Error al procesar imagen con LLaVA: {e}", "ERROR")
+                hablar(_T("imagen_error"))
 
-    # ---- Archivos de texto: leer e inyectar en historial ----
-    elif ext in (".txt", ".py", ".js", ".html", ".css", ".md", ".json",
-                 ".csv", ".log", ".xml", ".yaml", ".yml", ".toml", ".cfg",
-                 ".ini", ".bat", ".sh", ".ps1", ".sql", ".java", ".c",
-                 ".cpp", ".h", ".rs", ".go", ".ts", ".tsx", ".jsx"):
-        try:
-            contenido = ruta.read_text(encoding="utf-8", errors="replace")
-            # Limitar a 4000 caracteres para no saturar el contexto
-            if len(contenido) > 4000:
-                contenido = contenido[:4000] + "\n... [truncado]"
+        # ---- Archivos de texto: leer e inyectar en historial ----
+        elif ext in (".txt", ".py", ".js", ".html", ".css", ".md", ".json",
+                     ".csv", ".log", ".xml", ".yaml", ".yml", ".toml", ".cfg",
+                     ".ini", ".bat", ".sh", ".ps1", ".sql", ".java", ".c",
+                     ".cpp", ".h", ".rs", ".go", ".ts", ".tsx", ".jsx"):
+            emitir_ui("estado", "pensando")
+            try:
+                contenido = ruta.read_text(encoding="utf-8", errors="replace")
+                # Limitar a 4000 caracteres para no saturar el contexto
+                if len(contenido) > 4000:
+                    contenido = contenido[:4000] + "\n... [truncado]"
 
-            jarvis_memory.guardar_mensaje("system", f"El usuario ha arrastrado el archivo '{nombre}' ({ext}). Contenido:\n{contenido}")
+                jarvis_memory.guardar_mensaje("system", f"El usuario ha arrastrado el archivo '{nombre}' ({ext}). Contenido:\n{contenido}")
 
-            log(f"Archivo leído: {nombre} ({len(contenido)} chars)", "DROP")
-            emitir_ui("jarvis", f"Archivo leído: {nombre}")
-            hablar(_T("archivo_leido"))
+                log(f"Archivo leído: {nombre} ({len(contenido)} chars)", "DROP")
+                emitir_ui("jarvis", f"Archivo leído: {nombre}")
+                hablar(_T("archivo_leido"))
 
-        except Exception as e:
-            log(f"Error al leer archivo {nombre}: {e}", "ERROR")
-            hablar(_T("archivo_leer_error", nombre=nombre))
+            except Exception as e:
+                log(f"Error al leer archivo {nombre}: {e}", "ERROR")
+                hablar(_T("archivo_leer_error", nombre=nombre))
 
-    else:
-        log(f"Tipo de archivo no soportado: {ext}", "DROP")
-        hablar(_T("archivo_no_soportado", ext=ext))
+        else:
+            log(f"Tipo de archivo no soportado: {ext}", "DROP")
+            hablar(_T("archivo_no_soportado", ext=ext))
+    finally:
+        emitir_ui("estado", "escuchando")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1679,26 +1764,29 @@ def consultar_mistral(orden: str) -> dict:
     else:
         log(f"Modelo general -> {MODELO_GENERAL}", "ROUTER")
 
-    # --- NUEVO USO DE SQLITE (Fase 1) ---
-    # 1. Guardamos lo que dijo el usuario
-    jarvis_memory.guardar_mensaje("user", orden)
-    
-    # 2. Preparamos los mensajes: System Prompt + Últimos 10 turnos de SQLite
-    mensajes = [{"role": "system", "content": obtener_system_prompt()}] + jarvis_memory.cargar_ultimos_mensajes(10)
-    # ------------------------------------
-
-    # Llamada a la IA
-    respuesta  = ollama.chat(model=modelo, messages=mensajes)
-    texto_raw  = respuesta["message"]["content"]
-
-    # 3. Guardamos la respuesta cruda de la IA
-    jarvis_memory.guardar_mensaje("assistant", texto_raw)
-
-    texto_limpio = limpiar_json(texto_raw)
     try:
-        return json.loads(texto_limpio)
-    except json.JSONDecodeError:
-        return {"accion": "conversar", "contenido": texto_raw.strip()}
+        # --- NUEVO USO DE SQLITE (Fase 1) ---
+        # 1. Guardamos lo que dijo el usuario
+        jarvis_memory.guardar_mensaje("user", orden)
+
+        # 2. Preparamos los mensajes: System Prompt + Últimos 10 turnos de SQLite
+        mensajes = [{"role": "system", "content": obtener_system_prompt()}] + jarvis_memory.cargar_ultimos_mensajes(10)
+        # ------------------------------------
+
+        # Llamada a la IA
+        respuesta  = ollama.chat(model=modelo, messages=mensajes)
+        texto_raw  = respuesta["message"]["content"]
+
+        # 3. Guardamos la respuesta cruda de la IA
+        jarvis_memory.guardar_mensaje("assistant", texto_raw)
+
+        texto_limpio = limpiar_json(texto_raw)
+        try:
+            return json.loads(texto_limpio)
+        except json.JSONDecodeError:
+            return {"accion": "conversar", "contenido": texto_raw.strip()}
+    except Exception:
+        raise  # Re-lanzar para que procesar_orden lo capture
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1792,6 +1880,8 @@ def procesar_orden(orden: str, recognizer=None, mic=None):
         log(f"Mistral respondio con error: {e}", "ERROR")
     except Exception as e:
         log(f"Fallo inesperado: {type(e).__name__}: {e}", "ERROR")
+    finally:
+        emitir_ui("estado", "escuchando")
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1836,6 +1926,7 @@ def bucle_voz(recognizer: "sr.Recognizer", mic: "sr.Microphone"):
         # ── 3. Comandos de cierre por voz ────────────────────────────────
         if any(f in texto for f in FRASES_CIERRE):
             _apagado_limpio()
+            continue # <-- ¡VITAL! Esto aborta la iteración y evita que hable de nuevo
 
         # ── 4. Comandos internos ─────────────────────────────────────────
         if "limpiar historial" in texto:
@@ -1874,11 +1965,17 @@ def bucle_voz(recognizer: "sr.Recognizer", mic: "sr.Microphone"):
         emitir_ui("usuario", comando)
 
         # Buscar atajos rapidos en el mapa de teclas ANTES de llamar a Mistral
+        # ARREGLO DE COLISIONES: Solo si la orden es corta (3 palabras o menos)
         atajo_directo = None
-        for frase, tecla in MAPA_TECLAS.items():
-            if frase in comando:
-                atajo_directo = {"accion": "presionar_tecla", "tecla": tecla, "descripcion": frase}
-                break
+        palabras = comando.split()
+        
+        if len(palabras) <= 3:
+            import re
+            for frase, tecla in MAPA_TECLAS.items():
+                # Usamos regex con límites de palabra (\b) para que "parar" no salte con "parará"
+                if re.search(rf'\b{frase}\b', comando, re.IGNORECASE):
+                    atajo_directo = {"accion": "presionar_tecla", "tecla": tecla, "descripcion": frase}
+                    break
 
         if atajo_directo:
             enrutar(atajo_directo, comando, recognizer, mic)
@@ -1950,25 +2047,45 @@ def bucle_teclado():
 # ══════════════════════════════════════════════════════════════════
 
 def _apagado_limpio():
-    """Cierre ordenado: despedida aleatoria por TTS, notifica, detiene el tray y sale."""
+    """Cierre ordenado: vacía la cola TTS, despedida síncrona, cierra BD y sale."""
+    import os # Aseguramos que esté importado
+    
     despedida = random.choice(DESPEDIDAS)
     log(despedida)
     notificar("JARVIS", despedida, duracion=4)
 
-    # Hablar de forma SINCRONA — no depender del worker que puede estar muerto
+    # 1. Vaciar la cola TTS para que el worker no reproduzca mensajes viejos
+    while not tts_queue.empty():
+        try:
+            tts_queue.get_nowait()
+            tts_queue.task_done()
+        except queue.Empty:
+            break
+
+    # 2. Hablar de forma SÍNCRONA — no depender del worker
     log("Reproduciendo despedida...", "SHUTDOWN")
     hablar_sync(despedida)
 
+    # 3. Detener el bucle principal
     running.clear()
     log("Deteniendo sistemas...", "SHUTDOWN")
+
+    # 4. Detener el icono de bandeja
     if TRAY_OK and _tray_icon is not None:
         try:
             _tray_icon.stop()
         except Exception:
             pass
-    time.sleep(0.5)
+
+    # 5. Cerrar SQLite limpiamente (WAL checkpoint → elimina .db-wal/.db-shm)
+    log("Cerrando base de datos...", "SHUTDOWN")
+    jarvis_memory.cerrar_conexion()
+
+    time.sleep(0.3)
     log("JARVIS apagado. Hasta pronto.", "SHUTDOWN")
-    sys.exit(0)
+    
+    # --- ARREGLO ZOMBI: Botón nuclear ---
+    os._exit(0)
 
 
 def iniciar_backend():
